@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "envelope.schema.json",
+  "title": "Saki protocol v1 envelope",
+  "type": "object",
+  "required": ["v", "type"],
+  "properties": {
+    "v": {"const": 1},
+    "type": {"type": "string", "minLength": 1},
+    "id": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "session": {"type": "string", "format": "uuid"},
+    "seq": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "reply_to": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+  },
+  "additionalProperties": true
+}

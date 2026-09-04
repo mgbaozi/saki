@@ -1,0 +1,25 @@
+# Developer profile: diagnostics and assertions remain visible.
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y
+CONFIG_TINYUSB_DEBUG_LEVEL=1
+
+# The carousel remains available through menuconfig but must not replace live
+# Host snapshots in the normal developer image.
+# CONFIG_SAKI_UI_DEMO is not set
+CONFIG_SAKI_BACKLIGHT_ACTIVE_PERCENT=80
+CONFIG_SAKI_BACKLIGHT_IDLE_PERCENT=35
+CONFIG_SAKI_BACKLIGHT_DISCONNECTED_PERCENT=20
+CONFIG_SAKI_BACKLIGHT_IDLE_TIMEOUT_SECONDS=30
+CONFIG_SAKI_BACKLIGHT_DISCONNECTED_TIMEOUT_SECONDS=15
+
+# Saki does not link the upstream LVGL demos; its own UI demo is controlled by
+# application code and is disabled in normal startup.
+# CONFIG_LV_USE_DEMO_WIDGETS is not set
+# CONFIG_LV_USE_DEMO_KEYPAD_AND_ENCODER is not set
+# CONFIG_LV_USE_DEMO_BENCHMARK is not set
+# CONFIG_LV_DEMO_BENCHMARK_RGB565A8 is not set
+# CONFIG_LV_USE_DEMO_STRESS is not set
+# CONFIG_LV_USE_DEMO_MUSIC is not set

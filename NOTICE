@@ -1,0 +1,28 @@
+Saki
+Copyright 2026 mgbaozi
+
+This product includes software developed by mgbaozi as part of the Saki
+project: https://github.com/mgbaozi/saki
+
+Saki is the name of the original project. The Apache License 2.0 does not
+grant permission to use that project name for a redistributed or derivative
+project, product, service, or distribution, or to imply endorsement by the
+original project or author. The name may still be used as reasonably necessary
+to describe the origin of the work and to reproduce this NOTICE.
+
+Redistributions and derivative works must preserve the applicable attribution
+notices for the original Saki project and its author as required by the Apache
+License 2.0.
+
+Third-party notices
+-------------------
+
+This distribution includes generated glyph data derived from Noto Sans CJK SC,
+licensed under the SIL Open Font License 1.1. The complete font license is in
+firmware/components/saki_ui/fonts/licenses/NotoSansCJK-OFL-1.1.txt.
+
+The firmware includes board-support code derived from the ATK-DNESP32S3B3
+examples published by Guangzhou Xingyi Electronic Technology Co., Ltd.
+(ALIENTEK / 正点原子). Original copyright notices are retained in those source
+files. Provenance is documented in
+firmware/components/vendor_box3_bsp/ORIGIN.md.

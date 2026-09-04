@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.16)
+
+set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
+set(EXTRA_COMPONENT_DIRS "../components")
+set(
+    TEST_COMPONENTS
+    "saki_protocol;saki_ui_policy"
+    CACHE STRING
+    "Saki components under test"
+    FORCE
+)
+set(IDF_TARGET "esp32s3")
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+idf_build_set_property(MINIMAL_BUILD ON)
+project(saki_firmware_tests)

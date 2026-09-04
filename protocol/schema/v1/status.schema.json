@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "status.schema.json",
+  "title": "Saki protocol v1 status snapshot",
+  "allOf": [
+    {"$ref": "envelope.schema.json"},
+    {
+      "type": "object",
+      "required": ["id", "session", "seq", "state"],
+      "properties": {
+        "type": {"const": "status"},
+        "state": {
+          "enum": [
+            "idle",
+            "starting",
+            "thinking",
+            "working",
+            "waiting_user",
+            "waiting_approval",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "task": {
+          "type": "object",
+          "required": ["id", "title"],
+          "properties": {
+            "id": {"type": "string", "minLength": 1, "maxLength": 64},
+            "title": {"type": "string", "minLength": 1, "maxLength": 160}
+          },
+          "additionalProperties": true
+        },
+        "activity": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["plan", "read", "edit", "shell", "web", "test", "message", "other"]
+            },
+            "summary": {"type": "string", "maxLength": 240},
+            "detail": {"type": "string", "maxLength": 512}
+          },
+          "additionalProperties": true
+        },
+        "progress": {
+          "type": "object",
+          "required": ["mode"],
+          "properties": {
+            "mode": {"enum": ["none", "indeterminate", "determinate"]},
+            "percent": {"type": "integer", "minimum": 0, "maximum": 100},
+            "label": {"type": "string", "maxLength": 64}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"mode": {"const": "determinate"}}},
+              "then": {"required": ["percent"]}
+            }
+          ],
+          "additionalProperties": true
+        },
+        "elapsed_ms": {"type": "integer", "minimum": 0},
+        "agent": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string", "maxLength": 32},
+            "model": {"type": "string", "maxLength": 64}
+          },
+          "additionalProperties": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["state"],
+            "properties": {"state": {"not": {"const": "idle"}}}
+          },
+          "then": {"required": ["task"]}
+        }
+      ],
+      "additionalProperties": true
+    }
+  ]
+}

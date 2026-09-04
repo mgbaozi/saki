@@ -1,0 +1,12 @@
+# Generated from the pinned Noto Sans CJK source; keep it in releases while
+# excluding the 3.3 MB table from language statistics and routine code review.
+firmware/components/saki_ui/fonts/saki_font_cjk_16.c linguist-generated=true
+
+# The imported vendor baseline uses CRLF. Preserve its source form and teach
+# Git that CR at end-of-line is not trailing whitespace.
+firmware/.clangd whitespace=cr-at-eol
+firmware/CMakeLists.txt whitespace=cr-at-eol
+firmware/main/idf_component.yml whitespace=cr-at-eol
+firmware/main/main.c whitespace=cr-at-eol
+firmware/partitions-16MiB.csv whitespace=cr-at-eol
+firmware/components/vendor_box3_bsp/** -whitespace

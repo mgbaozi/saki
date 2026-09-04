@@ -1,0 +1,1 @@
+{"v":1,"type":"hello","id":1,"reply_to":1,"role":"device","device":{"name":"saki-box3","fw":"0.1.0","id":"0123456789ab"},"screen":{"width":320,"height":240},"capabilities":["status","progress","utf8","touch-detail"]}

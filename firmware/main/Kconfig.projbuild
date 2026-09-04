@@ -1,0 +1,36 @@
+menu "Saki application"
+
+config SAKI_UI_DEMO
+    bool "Run the local UI state carousel"
+    default n
+    help
+        Cycle through Saki states without a Mac Host. Keep this disabled for
+        normal development and every release build because it periodically
+        replaces live protocol snapshots on the display.
+
+config SAKI_BACKLIGHT_ACTIVE_PERCENT
+    int "Active backlight percentage"
+    range 1 100
+    default 80
+
+config SAKI_BACKLIGHT_IDLE_PERCENT
+    int "Idle backlight percentage"
+    range 1 100
+    default 35
+
+config SAKI_BACKLIGHT_DISCONNECTED_PERCENT
+    int "Disconnected backlight percentage"
+    range 1 100
+    default 20
+
+config SAKI_BACKLIGHT_IDLE_TIMEOUT_SECONDS
+    int "Idle dimming delay in seconds"
+    range 1 3600
+    default 300
+
+config SAKI_BACKLIGHT_DISCONNECTED_TIMEOUT_SECONDS
+    int "Disconnected dimming delay in seconds"
+    range 1 3600
+    default 60
+
+endmenu

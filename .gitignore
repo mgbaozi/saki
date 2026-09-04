@@ -1,0 +1,28 @@
+.DS_Store
+
+# ESP-IDF generated files
+firmware/build/
+firmware/build-*/
+firmware/test_app/build*/
+firmware/test_app/sdkconfig
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Python
+host/.venv/
+host/.mypy_cache/
+host/build/
+host/dist/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+host/*.egg-info/
+host/**/*.egg-info/
+
+# Local captures and generated artifacts
+artifacts/*
+!artifacts/.gitkeep
+*.log
+*.ndjson.capture
