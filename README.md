@@ -1,157 +1,138 @@
 # Saki
 
-Saki 是运行在正点原子 ATK-DNESP32S3B3 / ESP32S3 BOX3 上的 AI Agent 状态屏。Mac 伴随程序采集 Codex 等 Agent 的生命周期事件，归一化后通过 USB CDC 发送给设备；后续将支持 BLE 和 Wi-Fi fallback。
+Saki 是一块放在桌面上的 AI Agent 状态屏。它由 ESP32-S3 设备和 macOS 伴随程序组成，
+把 Codex 等 Agent 的工作状态同步到独立屏幕，让你不切换窗口也能看到任务正在思考、执行、
+等待操作，还是已经完成。
 
-## 文档
+当前硬件目标是正点原子 ATK-DNESP32S3B3 / ESP32S3 BOX3，使用 320×240 横屏，并通过
+USB CDC 与 Mac 通信。BLE 和 Wi-Fi fallback 已列入[路线图](./docs/ROADMAP.md)。
 
-- [文档索引与命名规则](./docs/README.md)
-- [0.2.0 产品和协议规格](./docs/versions/0.2.0/SPEC.md)
-- [0.2.0 工程实施设计](./docs/versions/0.2.0/IMPLEMENTATION.md)
-- [0.2.0 实施任务清单](./docs/versions/0.2.0/TASKS.md)
-- [0.2.0 用户安装与排障指南](./docs/versions/0.2.0/USER_GUIDE.md)
-- [0.2.0 发布说明](./docs/releases/0.2.0.md)
-- [后续路线图](./docs/ROADMAP.md)
+## 实机效果
 
-## 目录
+| 正在思考 | 任务完成 |
+| --- | --- |
+| ![Saki 正在思考状态屏幕特写](./docs/images/saki-screen-thinking.png) | ![Saki 任务完成状态屏幕特写](./docs/images/saki-screen-completed.png) |
 
-- `firmware/`：ESP-IDF 5.5.3 + LVGL 8.4.0 设备固件。
-- `host/`：运行在 Mac 上的 Python 伴随程序。
-- `protocol/`：两端共享的协议 Schema 和测试 fixture。
-- `scripts/`：环境、构建、烧录和检查脚本。
-- `docs/`：产品规格、工程设计、任务与发布文档。
+## 主要能力
 
-## 当前状态
+- 展示启动、思考、执行、等待用户、等待批准、完成、失败、取消和空闲状态。
+- 显示中英文任务标题、动作摘要、活动类型、执行时间和确定/未知进度。
+- 执行时间由设备持续更新，新事件到达时自动校准；未知进度使用平滑循环动画。
+- 支持触摸切换摘要与详情、自动返回、暗屏唤醒和断线状态提示。
+- 自动发现 USB 设备，并处理握手、ACK/重试、心跳、热插拔和会话恢复。
+- Agent 事件在 Mac 上归一化和脱敏，不向设备发送隐藏思维链或完整工具输出。
+- 内置常用简体中文字库，任务标题和固定文案可直接显示中文。
 
-- 固件已接入有界 NDJSON、握手、完整状态、ACK、session/seq、clear、ping/pong、error 和 TinyUSB CDC；正常启动时枚举为 `Saki Agent Display`。
-- 320×240 横屏布局已在目标设备确认，Mac demo 已真机连续驱动 idle、starting、working、waiting_approval 和 completed。
-- Mac Host 已支持 Product/Serial 发现、握手确认、ACK 重发、心跳、断线重连、latest snapshot 合并和 Unix Domain Socket hook collector；已连接端口连续 200 ms 消失后立即进入 10 秒、100 ms 间隔的快速重连窗口，之后才恢复指数退避。
-- 项目级 Codex hooks 覆盖九个生命周期事件；hook 进程只投递归一化、脱敏后的完整快照，不传递原始工具输出。
-- Host 会把 hook 文本中的 `&#x20;`、`&#32;`、`&nbsp;` 等空白实体还原为普通空格；其他 HTML 实体保持原样。
-- 固件已加入 Noto Sans CJK SC 的完整 GB2312 子集（7,445 字形）作为 Montserrat fallback，固定文案和常用简体中文任务标题不再显示方框。
-- 设备当前运行 `0.2.0` release：它会在握手后监测 Host 活动；连续 15 秒没有有效 status/clear/ping 时清除会话、保留最后快照并标记离线，恢复后强制重新握手。活动状态的执行时间由设备每秒更新，新 Agent 事件会用 Host 基准重新校准，终态或断线时冻结；未知进度显示为设备端 ease-in-out 平滑往返的短条动画，不再伪装成固定百分比。
-- 固件已实现触摸摘要/详情切换、15 秒自动返回和暗屏首次点击仅唤醒；活动、空闲和断线三档感知亮度由 LVGL 遮罩实现。目标板背光脚仅提供开关，因此三档显示不会降低背光功耗。
-- Host 和设备均执行 UTF-8 安全处理；设备在 JSON 解析前验证整帧编码，文本截断不会切断多字节字符，非法编码会被拒绝且不会进入 UI。
-- 固件在 `pong.diagnostics` 中报告有效/非法/超长帧、旧序列、UI 覆盖、TX 丢弃和心跳超时，计数达到 `uint32` 上限后饱和；`0.2.0-dev` 进一步通过可选的 `pong.runtime` 报告当前/历史最低 heap、内部 heap 和 app/UI/USB stack watermark，Host `doctor` 会检查安全余量。
-- 已建立相互隔离的 dev/release 构建：日常开发使用固件 `0.2.0-dev` 和 Host `0.2.0.dev0`；首个正式 release 定为 `0.2.0`。最新 dev 镜像 1,017,680 bytes、分区余 50%，release 镜像 923,648 bytes、分区余 55%。
-- 78 项 Host/协议/文档与仓库可移植性测试和 Ruff 检查通过；包含 runtime 与 UI policy 覆盖在内的 17 项 ESP-IDF Unity 用例已在目标设备得到 `0 Failures`。
-- 本地 hook IPC 携带不含内容的单调时钟时间戳；release 真机 12 个 hook→设备 ACK 样本平均 114.6 ms、P95/最大 169.4 ms。
-- macOS LaunchAgent 已支持登录自动启动、异常拉起、状态/日志查询、受控重启和完整卸载。
-- 当前 `0.2.0` 只剩第一版功能验收、Host 版本转正和最终封包/tag。24 小时运行、Mac
-  睡眠/唤醒和 LCD 光学延迟测量已暂缓，不再阻止发布；触摸与视觉
-  亮度已完成真机确认，当前 `0.2.0-candidate` 固件包已重新生成并校验。
+## 工作方式
 
-## 快速构建
-
-```zsh
-source scripts/env-idf.zsh
-scripts/build-firmware.zsh
-# 等价于：scripts/build-firmware-profile.zsh dev
-
-# 仅在准备正式发布候选时构建：
-scripts/build-firmware-profile.zsh release
-
-# 生成带校验和、构建信息和烧录说明的候选包：
-scripts/package-release.zsh
+```text
+Codex lifecycle hooks
+        │  本地 Unix Domain Socket
+        ▼
+saki-host on macOS ── USB CDC / NDJSON ── ESP32-S3 firmware ── LCD
 ```
 
-Host 开发环境和离线检查：
+Mac Host 负责采集事件、脱敏、状态合并、设备发现和连接恢复；设备固件负责协议校验、状态
+模型、计时、动画、触摸和界面渲染。协议传输的是与角色无关的语义状态，因此后续可以在
+设备端加入不同形象或主题，而不必修改 Agent adapter。
+
+## Quick Start
+
+### 1. 准备环境
+
+需要 macOS、Python 3.12、ESP-IDF 5.5.3、目标开发板和一根支持数据传输的 USB 线。
 
 ```zsh
+git clone https://github.com/mgbaozi/saki.git
+cd saki
+
 python3.12 -m venv host/.venv
 host/.venv/bin/pip install -e 'host[dev]'
-scripts/check.zsh
+```
+
+构建脚本会从仓库布局推导 ESP-IDF 路径；如果 IDF 安装在其他位置，先设置：
+
+```zsh
+export SAKI_IDF_PATH=/path/to/esp-idf-v5.5.3
+```
+
+### 2. 构建固件
+
+```zsh
+scripts/build-firmware.zsh
+```
+
+这会生成日常开发固件。构建不需要连接设备。
+
+### 3. 烧录设备
+
+1. 按住 `K0`。
+2. 短按 `RST`，等待约一秒后松开 `K0`。
+3. 确认新出现的 `/dev/cu.usbmodem*` 端口，并把实际端口传给烧录脚本：
+
+```zsh
+scripts/flash-firmware.zsh /dev/cu.usbmodemXXXXXX dev
+```
+
+烧录完成后，不按 `K0`，短按一次 `RST` 启动应用。端口名会随重新枚举变化，不要把真实
+端口永久写入配置。
+
+### 4. 启动 Mac Host
+
+先确认设备可以被发现并完成握手：
+
+```zsh
 host/.venv/bin/saki-host serial list
 host/.venv/bin/saki-host doctor
 ```
 
-可选的 24 小时/10,000 次状态更新扩展验证使用专用 soak 命令；它会记录 ACK 延迟、设备
-诊断、heap/stack 和 Host RSS，并拒绝覆盖已有报告。该测试不属于当前版本发布门槛：
-
-```zsh
-scripts/saki-service.zsh stop
-host/.venv/bin/saki-host serial soak \
-  --count 10000 --duration 86400 --sample-interval 60 \
-  --report artifacts/soak-24h.json
-scripts/saki-service.zsh start
-```
-
-临时释放常驻服务占用的串口后，可以发送单个完整快照或回放仓库内的脱敏会话：
-
-```zsh
-scripts/saki-service.zsh stop
-host/.venv/bin/saki-host send --state working --title "有线调试" \
-  --kind test --summary "正在验证单条状态" --percent 42
-host/.venv/bin/saki-host replay protocol/fixtures/v1/sessions/basic.ndjson
-scripts/saki-service.zsh start
-```
-
-`replay` 拒绝读取 `protocol/fixtures/v1/sessions` 之外的文件，避免误把真实会话或私密
-日志发送到屏幕。录制消息中的 session、id 和 seq 不会复用，而是经过模型校验后以新的
-设备会话重新编码。
-
-推荐用 LaunchAgent 安装常驻 Host（自动按 Product String 发现设备）：
+然后安装用户级常驻服务：
 
 ```zsh
 scripts/saki-service.zsh install
 scripts/saki-service.zsh status
-scripts/saki-service.zsh logs
 ```
 
-服务在当前用户登录后自动启动，异常退出后由 `launchd` 重新拉起。常用维护命令：
+在 Codex 中打开本项目，并在首次提示时信任 `.codex/hooks.json`。之后 Agent 生命周期事件
+会通过本地 Host 自动同步到屏幕。
+
+## 常用命令
 
 ```zsh
-scripts/saki-service.zsh stop
-scripts/saki-service.zsh start
+# 运行 Host、协议和文档检查
+scripts/check.zsh
+
+# 查看或维护常驻服务
+scripts/saki-service.zsh status
+scripts/saki-service.zsh logs
 scripts/saki-service.zsh restart
 scripts/saki-service.zsh uninstall
+
+# 构建 release profile 或固件测试镜像
+scripts/build-firmware-profile.zsh release
+scripts/build-firmware-tests.zsh
 ```
 
-卸载会停止服务并删除 `~/Library/LaunchAgents/com.saki.agent-display.plist`，但保留
-`~/Library/Logs/Saki` 供排障。项目目录或 `host/.venv` 位置改变后需要重新执行
-`install`。已安装 LaunchAgent 时不要再手工启动第二个 Host；临时开发或独占串口测试前
-先 `stop`，完成后再 `start`。例如运行 3 次 DTR 打开/关闭与握手测试：
+需要独占串口进行手工发送、回放或测试时，先停止常驻服务，完成后再启动。详细命令和故障
+排查见[用户指南](./docs/versions/0.2.0/USER_GUIDE.md)。
 
-```zsh
-scripts/saki-service.zsh stop
-host/.venv/bin/saki-host serial cycle --count 3 --interval 0.1
-scripts/saki-service.zsh start
-```
+## 项目结构
 
-发布前可运行确定性非法输入/恢复测试。它只读取仓库内脱敏 fixture，默认再生成 32 个
-有界随机变体；测试会占用业务串口，因此同样要先暂停常驻服务：
+- `firmware/`：ESP-IDF + LVGL 设备固件。
+- `host/`：运行在 macOS 上的 Python 伴随程序。
+- `protocol/`：Host 与固件共享的 NDJSON Schema 和脱敏测试 fixture。
+- `scripts/`：环境、构建、烧录、测试和 LaunchAgent 管理入口。
+- `docs/`：规格、工程设计、任务记录、发布说明和路线图。
 
-```zsh
-scripts/saki-service.zsh stop
-host/.venv/bin/saki-host serial fuzz --count 32 --seed 20260903
-host/.venv/bin/saki-host doctor
-scripts/saki-service.zsh start
-```
+## 文档
 
-物理拔插测试保持 LaunchAgent 运行，由旁路监视器记录设备消失、重新枚举以及 Host 完成
-握手的时间（`--serial` 是稳定的 USB Serial Number，不是动态 `/dev/cu.*` 路径）：
-
-```zsh
-host/.venv/bin/python scripts/monitor-usb-reconnect.py \
-  --serial 0123456789ab --cycles 3
-```
-
-Codex 在活跃状态下连续 120 秒没有产生任何 hook 时，Host 会把显示降级为
-`waiting_user` 并提示检查 Mac，避免额度耗尽、客户端异常等无终止事件的情况永久停在
-`thinking`。可用 `--stale-after SECONDS` 调整，设为 `0` 可关闭。
-
-项目 hook 位于 `.codex/hooks.json`，并通过 `scripts/saki-hook.zsh` 从当前 checkout 定位 Host，不写死用户目录。Codex 首次加载或 hook 内容改变后会要求确认信任；Host 未运行时 hook 会安静退出，不阻塞 Agent。
-
-烧录时必须显式传入当前动态发现的设备端口：
-
-```zsh
-scripts/flash-firmware.zsh /dev/cu.usbmodemXXXXXX dev
-# 发布候选必须显式选择 release：
-scripts/flash-firmware.zsh /dev/cu.usbmodemXXXXXX release
-```
-
-不要永久记录或写死 `/dev/cu.usbmodem*` 路径。
-
-业务 CDC 固件运行时不能用 esptool 自动切换到 ROM 下载器。再次烧录时按住 `K0`、短按 `RST`、松开 `K0`，等待 `USB JTAG/serial debug unit` 端口出现；烧录完成后在不按 `K0` 的情况下短按一次 `RST` 启动应用。
+- [文档索引](./docs/README.md)
+- [产品与通信规格](./docs/versions/0.2.0/SPEC.md)
+- [工程实施设计](./docs/versions/0.2.0/IMPLEMENTATION.md)
+- [实施任务与验证记录](./docs/versions/0.2.0/TASKS.md)
+- [用户安装与排障指南](./docs/versions/0.2.0/USER_GUIDE.md)
+- [发布说明](./docs/releases/0.2.0.md)
+- [后续路线图](./docs/ROADMAP.md)
 
 ## 许可证与项目名称
 
