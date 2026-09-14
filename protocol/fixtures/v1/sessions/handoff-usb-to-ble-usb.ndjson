@@ -1,0 +1,2 @@
+{"v":1,"type":"hello","id":20,"session":"00000000-0000-4000-8000-000000000003","role":"host","client":{"name":"saki-mac","version":"0.3.0"}}
+{"v":1,"type":"status","id":21,"session":"00000000-0000-4000-8000-000000000003","seq":10,"state":"working","task":{"id":"handoff-demo","title":"验证传输切换"},"activity":{"kind":"test","summary":"USB 状态同步"},"progress":{"mode":"indeterminate"},"elapsed_ms":1000,"agent":{"name":"Codex"}}

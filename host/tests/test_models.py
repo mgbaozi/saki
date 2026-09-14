@@ -1,6 +1,13 @@
 import unittest
 
-from saki_host.models import AgentState, Progress, ProgressMode, StateSnapshot, truncate_utf8
+from saki_host.models import (
+    MAX_JSON_SAFE_INTEGER,
+    AgentState,
+    Progress,
+    ProgressMode,
+    StateSnapshot,
+    truncate_utf8,
+)
 
 
 class ModelTests(unittest.TestCase):
@@ -17,6 +24,20 @@ class ModelTests(unittest.TestCase):
     def test_determinate_progress_requires_valid_percent(self) -> None:
         with self.assertRaises(ValueError):
             Progress(ProgressMode.DETERMINATE, 101)
+
+    def test_elapsed_accepts_json_safe_integer_maximum(self) -> None:
+        snapshot = StateSnapshot(
+            state=AgentState.IDLE,
+            elapsed_ms=MAX_JSON_SAFE_INTEGER,
+        )
+        self.assertEqual(snapshot.elapsed_ms, MAX_JSON_SAFE_INTEGER)
+
+    def test_elapsed_rejects_value_above_json_safe_integer_maximum(self) -> None:
+        with self.assertRaisesRegex(ValueError, "JSON safe integer"):
+            StateSnapshot(
+                state=AgentState.IDLE,
+                elapsed_ms=MAX_JSON_SAFE_INTEGER + 1,
+            )
 
 
 if __name__ == "__main__":

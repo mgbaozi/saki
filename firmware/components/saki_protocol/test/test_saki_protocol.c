@@ -13,7 +13,13 @@ typedef struct {
     char transmitted[2048];
     size_t transmitted_length;
     size_t apply_count;
+    size_t candidate_count;
     saki_state_snapshot_t latest_snapshot;
+    saki_transport_id_t latest_transport;
+    char latest_session[SAKI_PROTOCOL_SESSION_CAPACITY];
+    uint32_t latest_sequence;
+    saki_transport_result_t candidate_result;
+    uint32_t candidate_last_seq;
     bool fail_transmit;
     bool fail_apply;
 } protocol_context_t;
@@ -59,6 +65,38 @@ static esp_err_t capture_state(
     return ESP_OK;
 }
 
+static saki_transport_outcome_t capture_candidate(
+    const saki_state_snapshot_t *snapshot,
+    saki_transport_id_t transport,
+    const char *session,
+    uint32_t sequence,
+    uint64_t now_ms,
+    void *context
+)
+{
+    protocol_context_t *capture = context;
+    saki_transport_outcome_t outcome = {
+        .result = capture->candidate_result,
+        .has_last_seq = true,
+        .last_seq = capture->candidate_result == SAKI_TRANSPORT_APPLIED
+                        ? sequence
+                        : capture->candidate_last_seq,
+    };
+    (void)now_ms;
+
+    ++capture->candidate_count;
+    capture->latest_transport = transport;
+    capture->latest_sequence = sequence;
+    snprintf(
+        capture->latest_session,
+        sizeof(capture->latest_session),
+        "%s",
+        session
+    );
+    saki_state_snapshot_copy(&capture->latest_snapshot, snapshot);
+    return outcome;
+}
+
 static void capture_runtime_metrics(
     saki_runtime_metrics_t *metrics,
     void *context
@@ -100,6 +138,26 @@ static void initialize_engine(
         "test",
         capture_transmit,
         capture_state,
+        context
+    );
+}
+
+static void initialize_ble_peer(
+    saki_protocol_engine_t *engine,
+    protocol_context_t *context
+)
+{
+    memset(context, 0, sizeof(*context));
+    saki_protocol_engine_init_peer(
+        engine,
+        "0123456789ab",
+        "0.3.0-dev",
+        SAKI_TRANSPORT_BLE,
+        SAKI_PROTOCOL_CAPABILITY_BLE |
+            SAKI_PROTOCOL_CAPABILITY_SECURE_CONNECTION |
+            SAKI_PROTOCOL_CAPABILITY_TRANSPORT_ARBITRATION,
+        capture_transmit,
+        capture_candidate,
         context
     );
 }
@@ -205,6 +263,32 @@ TEST_CASE("NDJSON framer recovers after oversized input", "[saki][protocol]")
     TEST_ASSERT_EQUAL_STRING("ok", capture.latest_frame);
 }
 
+TEST_CASE("disconnect clears a partial frame before reconnect", "[saki][protocol]")
+{
+    static saki_protocol_engine_t engine;
+    static protocol_context_t capture;
+    static const char partial[] =
+        "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION;
+    static const char status[] =
+        "{\"v\":1,\"type\":\"status\",\"id\":4,\"session\":\"" TEST_SESSION
+        "\",\"seq\":1,\"state\":\"working\","
+        "\"task\":{\"id\":\"task-1\",\"title\":\"reconnected\"}}\n";
+
+    initialize_engine(&engine, &capture);
+    feed_hello(&engine, 1);
+    feed_text(&engine, partial);
+    TEST_ASSERT_GREATER_THAN_UINT32(0, engine.framer.length);
+
+    saki_protocol_engine_disconnect(&engine);
+    TEST_ASSERT_EQUAL_UINT32(0, engine.framer.length);
+    TEST_ASSERT_FALSE(engine.handshaken);
+
+    feed_hello(&engine, 3);
+    feed_text(&engine, status);
+    TEST_ASSERT_EQUAL_UINT32(1, capture.apply_count);
+    TEST_ASSERT_EQUAL_STRING("reconnected", capture.latest_snapshot.task_title);
+}
+
 TEST_CASE("protocol applies complete status and rejects old sequence", "[saki][protocol]")
 {
     static saki_protocol_engine_t engine;
@@ -244,6 +328,82 @@ TEST_CASE("protocol applies complete status and rejects old sequence", "[saki][p
     TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"applied\":false"));
     TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"type\":\"pong\""));
     TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"valid_frames\":4"));
+}
+
+TEST_CASE("protocol enforces the elapsed JSON safe integer range", "[saki][protocol]")
+{
+    static saki_protocol_engine_t engine;
+    static protocol_context_t capture;
+    static const char maximum[] =
+        "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
+        "\",\"seq\":1,\"state\":\"working\","
+        "\"task\":{\"id\":\"task-1\",\"title\":\"maximum\"},"
+        "\"elapsed_ms\":9007199254740991}\n";
+    static const char too_large[] =
+        "{\"v\":1,\"type\":\"status\",\"id\":3,\"session\":\"" TEST_SESSION
+        "\",\"seq\":2,\"state\":\"working\","
+        "\"task\":{\"id\":\"task-1\",\"title\":\"too large\"},"
+        "\"elapsed_ms\":9007199254740992}\n";
+
+    initialize_engine(&engine, &capture);
+    feed_hello(&engine, 1);
+    feed_text(&engine, maximum);
+    TEST_ASSERT_EQUAL_UINT32(1, capture.apply_count);
+    TEST_ASSERT_TRUE(
+        capture.latest_snapshot.elapsed_ms == UINT64_C(9007199254740991)
+    );
+
+    feed_text(&engine, too_large);
+    TEST_ASSERT_EQUAL_UINT32(1, capture.apply_count);
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"code\":\"invalid_field\""));
+}
+
+TEST_CASE("BLE peer routes capabilities transport and sequence", "[saki][protocol]")
+{
+    static saki_protocol_engine_t engine;
+    static protocol_context_t capture;
+    static const char status[] =
+        "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
+        "\",\"seq\":7,\"state\":\"working\","
+        "\"task\":{\"id\":\"task-ble\",\"title\":\"BLE task\"}}\n";
+
+    initialize_ble_peer(&engine, &capture);
+    feed_hello(&engine, 1);
+    feed_text(&engine, status);
+
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"ble\""));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"secure-connection\""));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"transport-arbitration\""));
+    TEST_ASSERT_EQUAL_UINT32(1, capture.candidate_count);
+    TEST_ASSERT_EQUAL_UINT32(0, capture.apply_count);
+    TEST_ASSERT_EQUAL(SAKI_TRANSPORT_BLE, capture.latest_transport);
+    TEST_ASSERT_EQUAL_UINT32(7, capture.latest_sequence);
+    TEST_ASSERT_EQUAL_STRING(TEST_SESSION, capture.latest_session);
+    TEST_ASSERT_EQUAL_STRING("BLE", capture.latest_snapshot.transport);
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"applied\":true"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"last_seq\":7"));
+}
+
+TEST_CASE("peer returns global stale sequence without applying", "[saki][protocol]")
+{
+    static saki_protocol_engine_t engine;
+    static protocol_context_t capture;
+    static const char status[] =
+        "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
+        "\",\"seq\":6,\"state\":\"working\","
+        "\"task\":{\"id\":\"task-old\",\"title\":\"Old\"}}\n";
+
+    initialize_ble_peer(&engine, &capture);
+    capture.candidate_result = SAKI_TRANSPORT_STALE;
+    capture.candidate_last_seq = 7;
+    feed_hello(&engine, 1);
+    feed_text(&engine, status);
+
+    TEST_ASSERT_EQUAL_UINT32(1, capture.candidate_count);
+    TEST_ASSERT_EQUAL_UINT32(0, capture.apply_count);
+    TEST_ASSERT_EQUAL_UINT32(1, engine.diagnostics.old_sequences);
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"applied\":false"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"last_seq\":7"));
 }
 
 TEST_CASE("elapsed clock advances and freezes by state", "[saki][model]")
@@ -288,6 +448,14 @@ TEST_CASE("pong includes optional runtime safety metrics", "[saki][protocol]")
         .app_stack_min_bytes = 1400,
         .ui_stack_min_bytes = 3200,
         .usb_stack_min_bytes = 2800,
+        .ble_stack_min_bytes = 2600,
+        .ble_rx_drops = 1,
+        .ble_tx_drops = 2,
+        .ble_security_rejections = 3,
+        .ble_pairing_rejections = 4,
+        .ble_disconnects = 5,
+        .transport_switches = 6,
+        .transport_rejections = 7,
     };
     static const char ping[] =
         "{\"v\":1,\"type\":\"ping\",\"id\":2,\"session\":\"" TEST_SESSION
@@ -308,6 +476,14 @@ TEST_CASE("pong includes optional runtime safety metrics", "[saki][protocol]")
     TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"app_stack_min_bytes\":1400"));
     TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"ui_stack_min_bytes\":3200"));
     TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"usb_stack_min_bytes\":2800"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"ble_stack_min_bytes\":2600"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"ble_rx_drops\":1"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"ble_tx_drops\":2"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"ble_security_rejections\":3"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"ble_pairing_rejections\":4"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"ble_disconnects\":5"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"transport_switches\":6"));
+    TEST_ASSERT_NOT_NULL(strstr(capture.transmitted, "\"transport_rejections\":7"));
     TEST_ASSERT_EQUAL_UINT32(0, engine.diagnostics.tx_drops);
 }
 

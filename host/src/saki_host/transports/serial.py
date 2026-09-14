@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol, Self
@@ -8,6 +9,7 @@ import serial
 from serial.tools import list_ports
 
 from ..protocol import MAX_FRAME_BYTES, ProtocolError, decode_frame, encode_frame
+from .base import ByteTransportClosed, ByteTransportError, TransportKind
 
 SAKI_PRODUCT = "Saki Agent Display"
 DEFAULT_BAUD_RATE = 115_200
@@ -134,6 +136,12 @@ class SerialSession:
         if written != len(data):
             raise SerialSessionError(f"short serial write: {written} of {len(data)} bytes")
 
+    def read_raw(self, size: int = 256) -> bytes:
+        try:
+            return self._stream.read(size)
+        except (OSError, serial.SerialException) as exc:
+            raise SerialSessionError(f"serial read failed: {exc}") from exc
+
     def drain_input(self, quiet_seconds: float = 0.25, timeout: float = 2.0) -> int:
         """Consume raw input until the device has been quiet for a bounded interval."""
         if quiet_seconds < 0 or timeout <= 0:
@@ -241,3 +249,51 @@ class SerialSession:
 
     def ping(self, message: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
         return self.request(message, "pong", timeout)
+
+
+class SerialByteTransport:
+    """Async ordered byte transport backed by the existing pyserial session."""
+
+    kind = TransportKind.USB
+
+    def __init__(self, port: str) -> None:
+        self.port = port
+        self.identity_hint = port
+        self._session: SerialSession | None = None
+
+    async def connect(self) -> None:
+        if self._session is not None:
+            return
+        try:
+            self._session = await asyncio.to_thread(SerialSession.open, self.port)
+        except SerialSessionError as exc:
+            raise ByteTransportError(str(exc)) from exc
+
+    async def read(self, max_bytes: int) -> bytes:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        while True:
+            session = self._session
+            if session is None:
+                raise ByteTransportClosed("serial transport is closed")
+            try:
+                chunk = await asyncio.to_thread(session.read_raw, max_bytes)
+            except SerialSessionError as exc:
+                raise ByteTransportError(str(exc)) from exc
+            if chunk:
+                return chunk
+
+    async def write(self, data: bytes) -> None:
+        session = self._session
+        if session is None:
+            raise ByteTransportClosed("serial transport is closed")
+        try:
+            await asyncio.to_thread(session.write_raw, data)
+        except SerialSessionError as exc:
+            raise ByteTransportError(str(exc)) from exc
+
+    async def close(self) -> None:
+        session = self._session
+        self._session = None
+        if session is not None:
+            await asyncio.to_thread(session.close)

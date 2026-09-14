@@ -4,7 +4,7 @@ set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
 set(EXTRA_COMPONENT_DIRS "../components")
 set(
     TEST_COMPONENTS
-    "saki_protocol;saki_ui_policy"
+    "saki_protocol;saki_ui_policy;saki_buttons;saki_transport"
     CACHE STRING
     "Saki components under test"
     FORCE

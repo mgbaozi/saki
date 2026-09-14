@@ -1,0 +1,2 @@
+{"v":1,"type":"hello","id":30,"session":"00000000-0000-4000-8000-000000000004","role":"host","client":{"name":"saki-mac","version":"0.3.0"}}
+{"v":1,"type":"status","id":31,"session":"00000000-0000-4000-8000-000000000004","seq":90,"state":"working","task":{"id":"priority-demo","title":"验证 USB 优先级"},"activity":{"kind":"test","summary":"BLE 当前为活动链路"},"progress":{"mode":"determinate","percent":60},"elapsed_ms":7000,"agent":{"name":"Codex"}}

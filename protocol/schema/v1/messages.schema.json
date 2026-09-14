@@ -108,7 +108,15 @@
                 "internal_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
                 "app_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
                 "ui_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "usb_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+                "usb_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "ble_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "ble_rx_drops": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "ble_tx_drops": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "ble_security_rejections": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "ble_pairing_rejections": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "ble_disconnects": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "transport_switches": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "transport_rejections": {"type": "integer", "minimum": 0, "maximum": 4294967295}
               },
               "additionalProperties": true
             }

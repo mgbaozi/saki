@@ -16,6 +16,7 @@
 #include "lvgl.h"
 #include "my_spi.h"
 #include "myiic.h"
+#include "saki_button_policy.h"
 #include "saki_font_cjk_16.h"
 #include "saki_ui_policy.h"
 #include "touch.h"
@@ -24,6 +25,7 @@
 #define SAKI_UI_TASK_PRIORITY    5
 #define SAKI_UI_TICK_PERIOD_US   1000
 #define SAKI_UI_HANDLER_MS       10
+#define SAKI_UI_START_TIMEOUT_MS 10000
 #define SAKI_UI_DEMO_PERIOD_MS   3000
 #define SAKI_PROGRESS_ANIM_MS    1100
 #define SAKI_PROGRESS_SEGMENT    24
@@ -32,14 +34,27 @@
 #define SAKI_DETAIL_RIGHT        308
 #define SAKI_DETAIL_TOP          88
 #define SAKI_DETAIL_BOTTOM       194
+#define SAKI_BUTTON_POLL_MS      20
+#define SAKI_BLE_NOTICE_MS       2400U
+#define SAKI_UI_BLE_PAIRING_WINDOW_MS 120000U
+
+typedef struct {
+    saki_ui_ble_notice_t notice;
+    uint32_t remaining_ms;
+} saki_ui_ble_message_t;
 
 static const char *TAG = "saki_ui";
 
 static QueueHandle_t s_state_queue;
+static QueueHandle_t s_ble_queue;
 static bool s_demo_mode;
 static TaskHandle_t s_task_handle;
+static esp_err_t s_start_result;
 static saki_state_snapshot_t s_current_snapshot;
 static saki_ui_policy_t s_policy;
+static saki_button_policy_t s_button_policy;
+static saki_ui_button_fn s_button_callback;
+static void *s_button_context;
 
 static lv_obj_t *s_status_dot;
 static lv_obj_t *s_agent_label;
@@ -53,7 +68,16 @@ static lv_obj_t *s_progress_bar;
 static lv_obj_t *s_progress_label;
 static lv_obj_t *s_model_label;
 static lv_obj_t *s_dimming_overlay;
+static lv_obj_t *s_ble_overlay;
+static lv_obj_t *s_ble_overlay_title;
+static lv_obj_t *s_ble_overlay_detail;
+static lv_obj_t *s_ble_overlay_progress;
 static bool s_progress_animating;
+static bool s_button_overlay_visible;
+static bool s_ble_notice_visible;
+static saki_ui_ble_notice_t s_ble_notice;
+static uint64_t s_ble_notice_deadline_ms;
+static uint64_t s_ble_pairing_deadline_ms;
 
 static lv_disp_draw_buf_t s_display_buffer;
 static lv_disp_drv_t s_display_driver;
@@ -319,10 +343,216 @@ static void saki_create_screen(void)
     lv_obj_set_width(s_model_label, 296);
     lv_label_set_long_mode(s_model_label, LV_LABEL_LONG_DOT);
 
+    s_ble_overlay = lv_obj_create(screen);
+    lv_obj_set_pos(s_ble_overlay, 12, 73);
+    lv_obj_set_size(s_ble_overlay, 296, 121);
+    lv_obj_set_style_bg_color(s_ble_overlay, lv_color_hex(0x111A2E), 0);
+    lv_obj_set_style_bg_opa(s_ble_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_ble_overlay, 2, 0);
+    lv_obj_set_style_border_color(s_ble_overlay, lv_color_hex(0x60A5FA), 0);
+    lv_obj_set_style_radius(s_ble_overlay, 10, 0);
+    lv_obj_set_style_pad_all(s_ble_overlay, 12, 0);
+    lv_obj_clear_flag(s_ble_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_ble_overlay_title = lv_label_create(s_ble_overlay);
+    saki_label_base(s_ble_overlay_title, lv_color_hex(0xF8FAFC));
+    lv_obj_set_style_text_font(s_ble_overlay_title, &s_font_16, 0);
+    lv_obj_set_width(s_ble_overlay_title, 268);
+
+    s_ble_overlay_detail = lv_label_create(s_ble_overlay);
+    saki_label_base(s_ble_overlay_detail, lv_color_hex(0xCBD5E1));
+    lv_obj_set_pos(s_ble_overlay_detail, 0, 32);
+    lv_obj_set_size(s_ble_overlay_detail, 268, 42);
+    lv_label_set_long_mode(s_ble_overlay_detail, LV_LABEL_LONG_WRAP);
+
+    s_ble_overlay_progress = lv_bar_create(s_ble_overlay);
+    lv_obj_set_pos(s_ble_overlay_progress, 0, 83);
+    lv_obj_set_size(s_ble_overlay_progress, 268, 8);
+    lv_bar_set_range(s_ble_overlay_progress, 0, 100);
+    lv_obj_set_style_bg_color(
+        s_ble_overlay_progress,
+        lv_color_hex(0x253553),
+        LV_PART_MAIN
+    );
+    lv_obj_set_style_bg_color(
+        s_ble_overlay_progress,
+        lv_color_hex(0x60A5FA),
+        LV_PART_INDICATOR
+    );
+    lv_obj_set_style_radius(
+        s_ble_overlay_progress,
+        LV_RADIUS_CIRCLE,
+        LV_PART_MAIN
+    );
+    lv_obj_set_style_radius(
+        s_ble_overlay_progress,
+        LV_RADIUS_CIRCLE,
+        LV_PART_INDICATOR
+    );
+    lv_obj_add_flag(s_ble_overlay, LV_OBJ_FLAG_HIDDEN);
+
     s_dimming_overlay = lv_obj_create(screen);
     lv_obj_set_pos(s_dimming_overlay, 0, 0);
     lv_obj_set_size(s_dimming_overlay, 320, 240);
     saki_set_plain_panel(s_dimming_overlay, lv_color_black());
+}
+
+static void saki_ble_overlay_show(
+    const char *title,
+    const char *detail,
+    int32_t progress
+)
+{
+    lv_label_set_text(s_ble_overlay_title, title);
+    lv_label_set_text(s_ble_overlay_detail, detail);
+    if (progress < 0) {
+        lv_obj_add_flag(s_ble_overlay_progress, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(s_ble_overlay_progress, LV_OBJ_FLAG_HIDDEN);
+        lv_bar_set_value(s_ble_overlay_progress, progress, LV_ANIM_OFF);
+    }
+    lv_obj_clear_flag(s_ble_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_dimming_overlay);
+    lv_obj_move_foreground(s_ble_overlay);
+}
+
+static void saki_ble_overlay_hide_if_idle(void)
+{
+    if (!s_button_overlay_visible && !s_ble_notice_visible) {
+        lv_obj_add_flag(s_ble_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void saki_ble_overlay_apply_notice(uint64_t now_ms)
+{
+    char title[40];
+    char detail[80];
+    int32_t progress = -1;
+
+    switch (s_ble_notice) {
+    case SAKI_UI_BLE_NO_BOND:
+        snprintf(title, sizeof(title), "%s", "No BLE bond");
+        snprintf(detail, sizeof(detail), "%s", "Hold K2 for 2s to pair.");
+        break;
+    case SAKI_UI_BLE_ALREADY_BONDED:
+        snprintf(title, sizeof(title), "%s", "BLE already paired");
+        snprintf(detail, sizeof(detail), "%s", "Hold K2 for 5s to clear first.");
+        break;
+    case SAKI_UI_BLE_PAUSED:
+        snprintf(title, sizeof(title), "%s", "BLE paused");
+        snprintf(detail, sizeof(detail), "%s", "Short-press K2 to reconnect.");
+        break;
+    case SAKI_UI_BLE_WAITING:
+        snprintf(title, sizeof(title), "%s", "BLE ready");
+        snprintf(detail, sizeof(detail), "%s", "Waiting for the paired Mac.");
+        break;
+    case SAKI_UI_BLE_PAIRING_WINDOW: {
+        uint64_t remaining_ms = s_ble_pairing_deadline_ms > now_ms
+            ? s_ble_pairing_deadline_ms - now_ms
+            : 0;
+        unsigned long remaining_seconds = (unsigned long)((remaining_ms + 999U) / 1000U);
+
+        snprintf(title, sizeof(title), "BLE pairing: %lus", remaining_seconds);
+        snprintf(detail, sizeof(detail), "%s", "Open Bluetooth on the Mac now.");
+        progress = (int32_t)(remaining_ms > SAKI_UI_BLE_PAIRING_WINDOW_MS
+            ? 100U
+            : remaining_ms / (SAKI_UI_BLE_PAIRING_WINDOW_MS / 100U));
+        break;
+    }
+    case SAKI_UI_BLE_CONNECTING:
+        snprintf(title, sizeof(title), "%s", "Securing BLE link");
+        snprintf(detail, sizeof(detail), "%s", "Waiting for encrypted connection.");
+        break;
+    case SAKI_UI_BLE_CONNECTED:
+        snprintf(title, sizeof(title), "%s", "BLE connected");
+        snprintf(detail, sizeof(detail), "%s", "The Mac can now send status.");
+        break;
+    case SAKI_UI_BLE_BONDS_CLEARED:
+        snprintf(title, sizeof(title), "%s", "BLE bonds cleared");
+        snprintf(detail, sizeof(detail), "%s", "Hold K2 for 2s to pair again.");
+        break;
+    case SAKI_UI_BLE_PAIRING_EXPIRED:
+        snprintf(title, sizeof(title), "%s", "Pairing window closed");
+        snprintf(detail, sizeof(detail), "%s", "Hold K2 for 2s to reopen it.");
+        break;
+    case SAKI_UI_BLE_UNAVAILABLE:
+    default:
+        snprintf(title, sizeof(title), "%s", "BLE unavailable");
+        snprintf(detail, sizeof(detail), "%s", "USB remains available.");
+        break;
+    }
+    saki_ble_overlay_show(title, detail, progress);
+}
+
+static void saki_ble_overlay_set_notice(
+    const saki_ui_ble_message_t *message,
+    uint64_t now_ms
+)
+{
+    s_ble_notice = message->notice;
+    s_ble_notice_visible = true;
+    s_ble_pairing_deadline_ms = 0;
+    if (message->notice == SAKI_UI_BLE_PAIRING_WINDOW) {
+        s_ble_pairing_deadline_ms = now_ms + message->remaining_ms;
+        s_ble_notice_deadline_ms = s_ble_pairing_deadline_ms;
+    } else {
+        s_ble_notice_deadline_ms = now_ms + SAKI_BLE_NOTICE_MS;
+    }
+    if (!s_button_overlay_visible) {
+        saki_ble_overlay_apply_notice(now_ms);
+    }
+}
+
+static void saki_ble_overlay_update_button(uint64_t now_ms)
+{
+    char title[40];
+    uint32_t held_ms = saki_button_policy_held_ms(&s_button_policy, now_ms);
+    uint32_t progress;
+
+    if (!s_button_policy.stable_pressed) {
+        if (s_button_overlay_visible) {
+            s_button_overlay_visible = false;
+            if (s_ble_notice_visible) {
+                saki_ble_overlay_apply_notice(now_ms);
+            } else {
+                saki_ble_overlay_hide_if_idle();
+            }
+        }
+        return;
+    }
+
+    s_button_overlay_visible = true;
+    progress = held_ms >= SAKI_BUTTON_CLEAR_HOLD_MS
+        ? 100U
+        : held_ms / (SAKI_BUTTON_CLEAR_HOLD_MS / 100U);
+    snprintf(
+        title,
+        sizeof(title),
+        "K2 held: %lu.%lus",
+        (unsigned long)(held_ms / 1000U),
+        (unsigned long)((held_ms % 1000U) / 100U)
+    );
+    saki_ble_overlay_show(
+        title,
+        held_ms < SAKI_BUTTON_PAIR_HOLD_MS
+            ? "Hold 2s to pair / 5s to clear."
+            : held_ms < SAKI_BUTTON_CLEAR_HOLD_MS
+                ? "Release: pair / keep holding: clear."
+                : "Clearing all BLE bonds...",
+        (int32_t)progress
+    );
+}
+
+static void saki_ble_overlay_tick(uint64_t now_ms)
+{
+    if (s_ble_notice_visible && now_ms >= s_ble_notice_deadline_ms) {
+        s_ble_notice_visible = false;
+        s_ble_pairing_deadline_ms = 0;
+        saki_ble_overlay_hide_if_idle();
+    } else if (s_ble_notice_visible && !s_button_overlay_visible &&
+               s_ble_notice == SAKI_UI_BLE_PAIRING_WINDOW) {
+        saki_ble_overlay_apply_notice(now_ms);
+    }
 }
 
 static void saki_format_elapsed(uint64_t elapsed_ms, char *buffer, size_t capacity)
@@ -609,13 +839,18 @@ static void saki_demo_snapshot(size_t index, saki_state_snapshot_t *snapshot)
 
 static void saki_ui_task(void *argument)
 {
+    TaskHandle_t start_waiter = (TaskHandle_t)argument;
     saki_state_snapshot_t update;
+    saki_ui_ble_message_t ble_message;
     TickType_t last_demo_tick = xTaskGetTickCount();
+    TickType_t last_button_tick = xTaskGetTickCount();
     uint64_t displayed_elapsed_seconds = UINT64_MAX;
     uint64_t now_ms;
     uint32_t policy_changes;
     size_t demo_index = 0;
-    esp_timer_handle_t tick_timer;
+    esp_timer_handle_t tick_timer = NULL;
+    esp_err_t result;
+    uint8_t button_inputs[2] = {0};
     const saki_ui_policy_config_t policy_config = {
         .active_percent = CONFIG_SAKI_BACKLIGHT_ACTIVE_PERCENT,
         .idle_percent = CONFIG_SAKI_BACKLIGHT_IDLE_PERCENT,
@@ -629,17 +864,33 @@ static void saki_ui_task(void *argument)
         .callback = saki_lvgl_tick,
         .name = "saki_lvgl_tick",
     };
-    (void)argument;
-
     lv_init();
     saki_fonts_init();
-    ESP_ERROR_CHECK(saki_display_init());
-    ESP_ERROR_CHECK(esp_timer_create(&tick_arguments, &tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(tick_timer, SAKI_UI_TICK_PERIOD_US));
+    result = saki_display_init();
+    if (result != ESP_OK) {
+        goto start_failed;
+    }
+    result = esp_timer_create(&tick_arguments, &tick_timer);
+    if (result != ESP_OK) {
+        goto start_failed;
+    }
+    result = esp_timer_start_periodic(tick_timer, SAKI_UI_TICK_PERIOD_US);
+    if (result != ESP_OK) {
+        goto start_failed;
+    }
     saki_create_screen();
 
     now_ms = (uint64_t)(esp_timer_get_time() / 1000);
     saki_ui_policy_init(&s_policy, &policy_config, now_ms);
+    if (aw9523b_read_byte(button_inputs, sizeof(button_inputs)) == ESP_OK) {
+        saki_button_policy_init(
+            &s_button_policy,
+            (button_inputs[0] & KEY_K2) != 0,
+            now_ms
+        );
+    } else {
+        saki_button_policy_init(&s_button_policy, false, now_ms);
+    }
     saki_state_snapshot_init(&s_current_snapshot);
     if (xQueueReceive(s_state_queue, &s_current_snapshot, 0) != pdTRUE) {
         s_current_snapshot.connected = false;
@@ -652,8 +903,43 @@ static void saki_ui_task(void *argument)
         &displayed_elapsed_seconds,
         true
     );
+    s_start_result = ESP_OK;
+    if (start_waiter != NULL) {
+        xTaskNotifyGive(start_waiter);
+    }
 
     while (true) {
+        if (xTaskGetTickCount() - last_button_tick >=
+            pdMS_TO_TICKS(SAKI_BUTTON_POLL_MS)) {
+            saki_button_event_t button_event = SAKI_BUTTON_EVENT_NONE;
+
+            now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            if (aw9523b_read_byte(button_inputs, sizeof(button_inputs)) == ESP_OK) {
+                button_event = saki_button_policy_update(
+                    &s_button_policy,
+                    (button_inputs[0] & KEY_K2) != 0,
+                    now_ms
+                );
+                if (s_button_policy.stable_pressed ||
+                    button_event != SAKI_BUTTON_EVENT_NONE) {
+                    saki_apply_policy_changes(
+                        saki_ui_policy_on_local_activity(&s_policy, now_ms)
+                    );
+                }
+                if (button_event != SAKI_BUTTON_EVENT_NONE &&
+                    s_button_callback != NULL) {
+                    s_button_callback(button_event, s_button_context);
+                }
+            }
+            saki_ble_overlay_update_button(now_ms);
+            last_button_tick = xTaskGetTickCount();
+        }
+
+        if (xQueueReceive(s_ble_queue, &ble_message, 0) == pdTRUE) {
+            now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            saki_ble_overlay_set_notice(&ble_message, now_ms);
+        }
+
         if (xQueueReceive(s_state_queue, &update, 0) == pdTRUE) {
             now_ms = (uint64_t)(esp_timer_get_time() / 1000);
             saki_state_snapshot_copy(&s_current_snapshot, &update);
@@ -704,6 +990,7 @@ static void saki_ui_task(void *argument)
             now_ms
         );
         saki_apply_policy_changes(policy_changes);
+        saki_ble_overlay_tick(now_ms);
         saki_refresh_elapsed(
             &s_current_snapshot,
             now_ms,
@@ -714,38 +1001,109 @@ static void saki_ui_task(void *argument)
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(SAKI_UI_HANDLER_MS));
     }
+
+start_failed:
+    ESP_LOGE(TAG, "UI initialization failed: %s", esp_err_to_name(result));
+    if (tick_timer != NULL) {
+        (void)esp_timer_stop(tick_timer);
+        (void)esp_timer_delete(tick_timer);
+    }
+    s_start_result = result;
+    if (start_waiter != NULL) {
+        xTaskNotifyGive(start_waiter);
+    }
+    s_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+void saki_ui_set_button_callback(
+    saki_ui_button_fn callback,
+    void *context
+)
+{
+    s_button_callback = callback;
+    s_button_context = context;
 }
 
 esp_err_t saki_ui_start(const saki_state_snapshot_t *initial_state, bool demo_mode)
 {
     BaseType_t created;
+    uint32_t notified;
 
     if (s_state_queue != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
     s_state_queue = xQueueCreate(1, sizeof(saki_state_snapshot_t));
-    if (s_state_queue == NULL) {
+    s_ble_queue = xQueueCreate(1, sizeof(saki_ui_ble_message_t));
+    if (s_state_queue == NULL || s_ble_queue == NULL) {
+        if (s_state_queue != NULL) {
+            vQueueDelete(s_state_queue);
+            s_state_queue = NULL;
+        }
+        if (s_ble_queue != NULL) {
+            vQueueDelete(s_ble_queue);
+            s_ble_queue = NULL;
+        }
         return ESP_ERR_NO_MEM;
     }
     if (initial_state != NULL) {
         xQueueOverwrite(s_state_queue, initial_state);
     }
     s_demo_mode = demo_mode;
+    s_start_result = ESP_ERR_INVALID_STATE;
     created = xTaskCreate(
         saki_ui_task,
         "saki_ui",
         SAKI_UI_TASK_STACK_BYTES,
-        NULL,
+        xTaskGetCurrentTaskHandle(),
         SAKI_UI_TASK_PRIORITY,
         &s_task_handle
     );
     if (created != pdPASS) {
         vQueueDelete(s_state_queue);
+        vQueueDelete(s_ble_queue);
         s_state_queue = NULL;
+        s_ble_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "Saki UI task started (demo=%d)", demo_mode);
+    notified = ulTaskNotifyTake(
+        pdTRUE,
+        pdMS_TO_TICKS(SAKI_UI_START_TIMEOUT_MS)
+    );
+    if (notified == 0) {
+        ESP_LOGE(TAG, "UI initialization timed out");
+        return ESP_ERR_TIMEOUT;
+    }
+    if (s_start_result != ESP_OK) {
+        vQueueDelete(s_state_queue);
+        vQueueDelete(s_ble_queue);
+        s_state_queue = NULL;
+        s_ble_queue = NULL;
+        return s_start_result;
+    }
+    ESP_LOGI(TAG, "Saki UI ready (demo=%d)", demo_mode);
     return ESP_OK;
+}
+
+esp_err_t saki_ui_notify_ble(
+    saki_ui_ble_notice_t notice,
+    uint32_t remaining_ms
+)
+{
+    saki_ui_ble_message_t message = {
+        .notice = notice,
+        .remaining_ms = remaining_ms,
+    };
+
+    if (notice < SAKI_UI_BLE_NO_BOND || notice > SAKI_UI_BLE_UNAVAILABLE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_ble_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return xQueueOverwrite(s_ble_queue, &message) == pdPASS
+        ? ESP_OK
+        : ESP_FAIL;
 }
 
 uint32_t saki_ui_stack_high_watermark_bytes(void)

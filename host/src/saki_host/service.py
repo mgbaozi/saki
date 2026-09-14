@@ -5,8 +5,15 @@ import socket
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 
+from .ble_binding import (
+    DEFAULT_BLE_BINDING_PATH,
+    BleBinding,
+    BleBindingError,
+    BleBindingStore,
+)
 from .ipc import (
     DEFAULT_SOCKET_PATH,
     HookDatagramProtocol,
@@ -15,7 +22,20 @@ from .ipc import (
 )
 from .models import Activity, ActivityKind, AgentState, Progress, ProgressMode, StateSnapshot
 from .protocol import ProtocolCodec
-from .transports.serial import SerialSession, SerialSessionError, select_saki_port
+from .protocol_session import ProtocolSession, ProtocolSessionError
+from .transports.base import TransportKind
+from .transports.ble import (
+    BleByteTransport,
+    BleDependencyError,
+    BleDiscoveryError,
+    discover_saki_devices,
+)
+from .transports.serial import (
+    SerialByteTransport,
+    SerialSession,
+    SerialSessionError,
+    select_saki_port,
+)
 
 _DEVICE_DIAGNOSTIC_KEYS = (
     "valid_frames",
@@ -36,6 +56,23 @@ _DEVICE_RUNTIME_KEYS = (
     "ui_stack_min_bytes",
     "usb_stack_min_bytes",
 )
+_DEVICE_OPTIONAL_RUNTIME_KEYS = (
+    "ble_stack_min_bytes",
+    "ble_rx_drops",
+    "ble_tx_drops",
+    "ble_security_rejections",
+    "ble_pairing_rejections",
+    "ble_disconnects",
+    "transport_switches",
+    "transport_rejections",
+)
+_BLE_CAPABILITIES = frozenset({"ble", "secure-connection", "transport-arbitration"})
+
+
+class ServiceTransportMode(StrEnum):
+    AUTO = "auto"
+    USB = "usb"
+    BLE = "ble"
 
 
 def parse_device_diagnostics(message: Mapping[str, object]) -> dict[str, int] | None:
@@ -63,6 +100,18 @@ def parse_device_runtime(message: Mapping[str, object]) -> dict[str, int] | None
     runtime: dict[str, int] = {}
     for key in _DEVICE_RUNTIME_KEYS:
         value = raw.get(key)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > 0xFFFF_FFFF
+        ):
+            return None
+        runtime[key] = value
+    for key in _DEVICE_OPTIONAL_RUNTIME_KEYS:
+        value = raw.get(key)
+        if value is None:
+            continue
         if (
             not isinstance(value, int)
             or isinstance(value, bool)
@@ -118,6 +167,11 @@ class SnapshotTimeline:
 @dataclass(frozen=True, slots=True)
 class ServiceConfig:
     port: str | None = None
+    transport: ServiceTransportMode = ServiceTransportMode.AUTO
+    ble_binding_path: Path = DEFAULT_BLE_BINDING_PATH
+    ble_scan_seconds: float = 5.0
+    usb_grace_seconds: float = 2.0
+    usb_probe_seconds: float = 0.5
     socket_path: Path = DEFAULT_SOCKET_PATH
     heartbeat_seconds: float = 5.0
     stale_after_seconds: float = 120.0
@@ -126,6 +180,27 @@ class ServiceConfig:
     reconnect_fast_interval_seconds: float = 0.1
     connected_port_check_seconds: float = 0.1
     connected_port_missing_samples: int = 2
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "transport", ServiceTransportMode(self.transport))
+        if self.ble_scan_seconds <= 0:
+            raise ValueError("ble_scan_seconds must be positive")
+        if self.usb_grace_seconds < 0:
+            raise ValueError("usb_grace_seconds cannot be negative")
+        if self.usb_probe_seconds <= 0:
+            raise ValueError("usb_probe_seconds must be positive")
+
+
+@dataclass(slots=True)
+class ActiveLink:
+    session: ProtocolSession
+    kind: TransportKind
+    identity_hint: str
+    device_id: str
+    port: str | None = None
+
+    async def close(self) -> None:
+        await self.session.close()
 
 
 class ReconnectPolicy:
@@ -158,12 +233,17 @@ class SakiHostService:
         self.config = config
         self.mailbox = SnapshotMailbox(StateSnapshot(state=AgentState.IDLE))
         self.timeline = SnapshotTimeline()
+        self._codec = ProtocolCodec()
+        self._binding_store = BleBindingStore(config.ble_binding_path)
+        self._supervisor_lock = asyncio.Lock()
         self._transport: asyncio.DatagramTransport | None = None
         self._last_source_at = time.monotonic()
         self._source_generation = 0
         self._stale_source_generation: int | None = None
         self._last_device_anomalies: tuple[int, ...] | None = None
         self._source_emitted: tuple[int, int] | None = None
+        self._warned_ble_dependency = False
+        self._warned_ble_binding = False
 
     def accept_snapshot(
         self,
@@ -328,37 +408,284 @@ class SakiHostService:
             disappeared.cancel()
             await asyncio.gather(disappeared, return_exceptions=True)
 
+    async def _close_link(self, link: ActiveLink | None) -> None:
+        if link is None:
+            return
+        try:
+            await link.close()
+        except ProtocolSessionError as exc:
+            print(f"disconnect cleanup failed transport={link.kind}: {exc}", flush=True)
+
+    async def _connect_usb_link(self, port: str | None = None) -> ActiveLink:
+        selected_port = port or await asyncio.to_thread(select_saki_port, self.config.port)
+        session = ProtocolSession(
+            SerialByteTransport(selected_port),
+            self._codec,
+            response_timeout=1.0,
+            retry_count=2,
+        )
+        try:
+            await session.connect()
+            hello = await session.handshake(timeout=3.0)
+        except BaseException:
+            try:
+                await session.close()
+            except ProtocolSessionError:
+                pass
+            raise
+        device = hello["device"]
+        return ActiveLink(
+            session=session,
+            kind=TransportKind.USB,
+            identity_hint=selected_port,
+            device_id=str(device["id"]),
+            port=selected_port,
+        )
+
+    def _load_ble_binding(self) -> BleBinding:
+        binding = self._binding_store.load()
+        if binding is None:
+            raise BleBindingError(
+                "no verified BLE binding; hold K2 for 2 seconds and run `saki-host ble pair`"
+            )
+        return binding
+
+    async def _connect_ble_link(self) -> ActiveLink:
+        binding = self._load_ble_binding()
+        candidates = await discover_saki_devices(timeout=self.config.ble_scan_seconds)
+        candidate = next(
+            (item for item in candidates if item.identifier == binding.identifier),
+            None,
+        )
+        if candidate is None:
+            raise BleDiscoveryError("the verified Saki BLE device is not visible")
+
+        session = ProtocolSession(
+            BleByteTransport(
+                candidate.device,
+                connect_timeout=self.config.ble_scan_seconds,
+            ),
+            self._codec,
+            response_timeout=2.0,
+            retry_count=2,
+        )
+        try:
+            await session.connect()
+            hello = await session.handshake(
+                timeout=max(3.0, self.config.ble_scan_seconds),
+                required_capabilities=_BLE_CAPABILITIES,
+            )
+            device_id = str(hello["device"]["id"])
+            if device_id != binding.device_id:
+                raise ProtocolSessionError("BLE device identity does not match verified binding")
+        except BaseException:
+            try:
+                await session.close()
+            except ProtocolSessionError:
+                pass
+            raise
+        return ActiveLink(
+            session=session,
+            kind=TransportKind.BLE,
+            identity_hint=binding.identifier,
+            device_id=device_id,
+        )
+
+    async def _sync_link(
+        self,
+        link: ActiveLink,
+    ) -> int:
+        current_generation = self.mailbox.generation
+        snapshot = self.mailbox.latest
+        source_emitted_ns = self._take_source_emitted(current_generation)
+        async with self._supervisor_lock:
+            ack = await link.session.apply_status(snapshot)
+        summary = (
+            f"synced state={snapshot.state.value} seq={ack.get('last_seq')} "
+            f"transport={link.kind} applied={ack.get('applied')}"
+        )
+        if source_emitted_ns is not None:
+            source_to_ack_ms = max(
+                0.0,
+                (time.monotonic_ns() - source_emitted_ns) / 1_000_000,
+            )
+            summary += f" source_to_ack_ms={source_to_ack_ms:.1f}"
+        print(summary, flush=True)
+        return current_generation
+
+    async def _wait_for_usb_availability(self) -> str:
+        while True:
+            try:
+                return await asyncio.to_thread(select_saki_port, self.config.port)
+            except SerialSessionError:
+                await asyncio.sleep(self.config.usb_probe_seconds)
+
+    async def _run_active_link(
+        self,
+        link: ActiveLink,
+        sent_generation: int,
+    ) -> tuple[ActiveLink, int]:
+        disappeared: asyncio.Task[None] | None = None
+        usb_available: asyncio.Task[str] | None = None
+        update: asyncio.Task[tuple[StateSnapshot, int]] | None = None
+        if link.kind is TransportKind.USB:
+            assert link.port is not None
+            disappeared = asyncio.create_task(self._wait_for_port_disappearance(link.port))
+        elif self.config.transport is ServiceTransportMode.AUTO:
+            usb_available = asyncio.create_task(self._wait_for_usb_availability())
+
+        try:
+            while True:
+                update = asyncio.create_task(self.mailbox.wait_after(sent_generation))
+                watched = {update}
+                if disappeared is not None:
+                    watched.add(disappeared)
+                if usb_available is not None:
+                    watched.add(usb_available)
+                done, _ = await asyncio.wait(
+                    watched,
+                    timeout=self.config.heartbeat_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if disappeared is not None and disappeared in done:
+                    raise ProtocolSessionError(f"serial device disappeared: {link.port}")
+
+                if usb_available is not None and usb_available in done:
+                    candidate: ActiveLink | None = None
+                    try:
+                        candidate = await self._connect_usb_link(usb_available.result())
+                        candidate_generation = await self._sync_link(candidate)
+                    except (ProtocolSessionError, SerialSessionError) as exc:
+                        await self._close_link(candidate)
+                        print(f"USB takeover deferred reason={exc}", flush=True)
+                        usb_available = asyncio.create_task(self._wait_for_usb_availability())
+                    else:
+                        print(
+                            f"switched transport=usb device=…{candidate.device_id[-4:]} "
+                            f"reason=usb-priority generation={candidate_generation}",
+                            flush=True,
+                        )
+                        return candidate, candidate_generation
+
+                if update in done:
+                    snapshot, generation = update.result()
+                    del snapshot, generation
+                    sent_generation = await self._sync_link(link)
+                    continue
+
+                update.cancel()
+                await asyncio.gather(update, return_exceptions=True)
+                async with self._supervisor_lock:
+                    pong = await link.session.ping()
+                self.observe_device_diagnostics(pong)
+        finally:
+            tasks = [
+                task for task in (update, disappeared, usb_available) if task is not None
+            ]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _connection_loop(self) -> None:
         reconnect = ReconnectPolicy(self.config)
+        usb_grace_until = 0.0
         while True:
-            session: SerialSession | None = None
+            link: ActiveLink | None = None
             was_connected = False
-            error: SerialSessionError | None = None
+            error: Exception | None = None
             try:
-                port = await asyncio.to_thread(select_saki_port, self.config.port)
-                session = await asyncio.to_thread(SerialSession.open, port)
-                codec = ProtocolCodec()
-                hello = await asyncio.to_thread(session.handshake, codec.hello(), 3.0)
-                device = hello["device"]
-                print(f"connected device={device['id']} port={port}", flush=True)
+                mode = self.config.transport
+                if mode in {ServiceTransportMode.AUTO, ServiceTransportMode.USB}:
+                    try:
+                        link = await self._connect_usb_link()
+                    except (ProtocolSessionError, SerialSessionError) as exc:
+                        error = exc
+                        if mode is ServiceTransportMode.USB:
+                            raise
+
+                if link is None and mode in {ServiceTransportMode.AUTO, ServiceTransportMode.BLE}:
+                    remaining_grace = usb_grace_until - time.monotonic()
+                    if remaining_grace > 0:
+                        await asyncio.sleep(remaining_grace)
+                        if mode is ServiceTransportMode.AUTO:
+                            try:
+                                link = await self._connect_usb_link()
+                            except (ProtocolSessionError, SerialSessionError) as exc:
+                                error = exc
+                    if link is None:
+                        try:
+                            link = await self._connect_ble_link()
+                        except BleDependencyError as exc:
+                            if mode is ServiceTransportMode.BLE:
+                                raise
+                            if not self._warned_ble_dependency:
+                                print(f"BLE unavailable; continuing USB-only: {exc}", flush=True)
+                                self._warned_ble_dependency = True
+                            error = exc
+                        except BleBindingError as exc:
+                            if mode is ServiceTransportMode.BLE:
+                                raise
+                            if not self._warned_ble_binding:
+                                print(
+                                    f"BLE fallback unavailable; continuing USB-only: {exc}",
+                                    flush=True,
+                                )
+                                self._warned_ble_binding = True
+                            error = exc
+                        except (BleDiscoveryError, ProtocolSessionError) as exc:
+                            error = exc
+
+                if link is None:
+                    raise error or ProtocolSessionError("no configured transport is available")
+
+                sent_generation = await self._sync_link(link)
+                print(
+                    f"connected device=…{link.device_id[-4:]} "
+                    f"transport={link.kind} "
+                    f"identity={link.identity_hint if link.kind is TransportKind.USB else '…' + link.identity_hint[-4:]}",
+                    flush=True,
+                )
                 reconnect.on_connected()
                 was_connected = True
-                await self._connected_loop(session, codec, port)
+                while True:
+                    replacement, replacement_generation = await self._run_active_link(
+                        link,
+                        sent_generation,
+                    )
+                    await self._close_link(link)
+                    link = replacement
+                    sent_generation = replacement_generation
             except asyncio.CancelledError:
                 raise
-            except SerialSessionError as exc:
+            except (
+                BleBindingError,
+                BleDependencyError,
+                BleDiscoveryError,
+                ProtocolSessionError,
+                SerialSessionError,
+            ) as exc:
                 error = exc
             finally:
-                if session is not None:
-                    await asyncio.to_thread(session.close)
+                if link is not None and link.kind is TransportKind.USB and was_connected:
+                    usb_grace_until = time.monotonic() + self.config.usb_grace_seconds
+                await self._close_link(link)
 
             if error is None:
-                error = SerialSessionError("connected session ended unexpectedly")
+                error = ProtocolSessionError("connected session ended unexpectedly")
+            if self.config.transport is ServiceTransportMode.BLE and isinstance(
+                error, (BleBindingError, BleDependencyError)
+            ):
+                raise error
             delay, fast = reconnect.next_delay(
                 was_connected=was_connected,
                 now=time.monotonic(),
             )
-            if was_connected or not fast:
+            stable_auto_ble_error = (
+                self.config.transport is ServiceTransportMode.AUTO
+                and isinstance(error, (BleBindingError, BleDependencyError))
+            )
+            if (was_connected or not fast) and not stable_auto_ble_error:
                 mode = " fast-window" if fast else ""
                 print(
                     f"disconnected reason={error}; retrying in {delay:.2f}s{mode}",

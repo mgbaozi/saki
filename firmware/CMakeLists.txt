@@ -6,9 +6,9 @@ set(SAKI_BUILD_PROFILE "dev" CACHE STRING "Saki firmware build profile")
 set_property(CACHE SAKI_BUILD_PROFILE PROPERTY STRINGS dev release)
 
 if(SAKI_BUILD_PROFILE STREQUAL "dev")
-    set(SAKI_VERSION "0.2.0-dev")
+    set(SAKI_VERSION "0.3.0-dev")
 elseif(SAKI_BUILD_PROFILE STREQUAL "release")
-    set(SAKI_VERSION "0.2.0")
+    set(SAKI_VERSION "0.3.0")
 else()
     message(FATAL_ERROR
         "Unsupported SAKI_BUILD_PROFILE='${SAKI_BUILD_PROFILE}'; use dev or release"
@@ -17,7 +17,9 @@ endif()
 
 # Keep every profile self-contained. In particular, never allow the historical
 # source-tree sdkconfig to leak into a dev or release build.
-set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
+if(NOT DEFINED SDKCONFIG)
+    set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
+endif()
 set(SDKCONFIG_DEFAULTS
     "${CMAKE_CURRENT_LIST_DIR}/config/sdkconfig.vendor;${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults;${CMAKE_CURRENT_LIST_DIR}/config/sdkconfig.${SAKI_BUILD_PROFILE}"
 )

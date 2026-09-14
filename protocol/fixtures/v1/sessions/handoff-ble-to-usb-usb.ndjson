@@ -1,0 +1,2 @@
+{"v":1,"type":"hello","id":32,"session":"00000000-0000-4000-8000-000000000004","role":"host","client":{"name":"saki-mac","version":"0.3.0"}}
+{"v":1,"type":"status","id":33,"session":"00000000-0000-4000-8000-000000000004","seq":91,"state":"working","task":{"id":"priority-demo","title":"验证 USB 优先级"},"activity":{"kind":"test","summary":"USB 提交最新完整状态"},"progress":{"mode":"determinate","percent":70},"elapsed_ms":7600,"agent":{"name":"Codex"}}

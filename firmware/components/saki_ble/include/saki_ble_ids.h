@@ -1,0 +1,9 @@
+#ifndef SAKI_BLE_IDS_H
+#define SAKI_BLE_IDS_H
+
+#define SAKI_BLE_NAME "Saki"
+#define SAKI_BLE_SERVICE_UUID "9f6d0100-7c7a-4c3b-9d9a-73616b690001"
+#define SAKI_BLE_RX_UUID "9f6d0101-7c7a-4c3b-9d9a-73616b690001"
+#define SAKI_BLE_TX_UUID "9f6d0102-7c7a-4c3b-9d9a-73616b690001"
+
+#endif

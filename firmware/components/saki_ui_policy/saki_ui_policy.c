@@ -77,6 +77,22 @@ uint32_t saki_ui_policy_on_tap(
     return SAKI_UI_POLICY_VIEW_CHANGED;
 }
 
+uint32_t saki_ui_policy_on_local_activity(
+    saki_ui_policy_t *policy,
+    uint64_t now_ms
+)
+{
+    if (policy == NULL) {
+        return SAKI_UI_POLICY_NO_CHANGE;
+    }
+    policy->last_activity_ms = now_ms;
+    if (policy->backlight_percent == policy->config.active_percent) {
+        return SAKI_UI_POLICY_NO_CHANGE;
+    }
+    policy->backlight_percent = policy->config.active_percent;
+    return SAKI_UI_POLICY_BACKLIGHT_CHANGED;
+}
+
 uint32_t saki_ui_policy_tick(
     saki_ui_policy_t *policy,
     const saki_state_snapshot_t *snapshot,

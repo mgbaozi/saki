@@ -134,3 +134,24 @@ TEST_CASE("brightness percentages map to stable dimming opacity", "[saki][ui-pol
     TEST_ASSERT_EQUAL_UINT8(204, saki_ui_policy_dimming_opacity(20));
     TEST_ASSERT_EQUAL_UINT8(0, saki_ui_policy_dimming_opacity(255));
 }
+
+TEST_CASE("local button activity wakes the backlight", "[saki][ui-policy]")
+{
+    saki_ui_policy_t policy;
+    saki_state_snapshot_t snapshot;
+
+    initialize_snapshot(&snapshot);
+    snapshot.connected = false;
+    saki_ui_policy_init(&policy, &test_config, 0);
+    TEST_ASSERT_EQUAL(
+        SAKI_UI_POLICY_BACKLIGHT_CHANGED,
+        saki_ui_policy_tick(&policy, &snapshot, 200)
+    );
+    TEST_ASSERT_EQUAL_UINT8(20, policy.backlight_percent);
+    TEST_ASSERT_EQUAL(
+        SAKI_UI_POLICY_BACKLIGHT_CHANGED,
+        saki_ui_policy_on_local_activity(&policy, 300)
+    );
+    TEST_ASSERT_EQUAL_UINT8(80, policy.backlight_percent);
+    TEST_ASSERT_EQUAL_UINT64(300, policy.last_activity_ms);
+}

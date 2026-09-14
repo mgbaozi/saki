@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from saki_host.fuzz import build_fuzz_cases
+from saki_host.fuzz import INVALID_FIXTURE_ROOT, build_fuzz_cases
 from saki_host.protocol import MAX_FRAME_BYTES
 
 
@@ -12,10 +12,11 @@ class FuzzCorpusTests(unittest.TestCase):
         second = build_fuzz_cases(random_case_count=8, seed=1234)
 
         self.assertEqual(first, second)
-        self.assertEqual(len(first), 16)
+        fixture_count = len(list(INVALID_FIXTURE_ROOT.glob("*.json")))
+        self.assertEqual(len(first), fixture_count + 6 + 8)
         self.assertEqual(
             [case.name for case in first if case.name.startswith("fixture:")],
-            ["fixture:status-bad-progress.json", "fixture:status-missing-state.json"],
+            [f"fixture:{path.name}" for path in sorted(INVALID_FIXTURE_ROOT.glob("*.json"))],
         )
         self.assertEqual(len({case.name for case in first}), len(first))
 

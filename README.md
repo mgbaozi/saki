@@ -4,8 +4,10 @@ Saki 是一块放在桌面上的 AI Agent 状态屏。它由 ESP32-S3 设备和 
 把 Codex 等 Agent 的工作状态同步到独立屏幕，让你不切换窗口也能看到任务正在思考、执行、
 等待操作，还是已经完成。
 
-当前硬件目标是正点原子 ATK-DNESP32S3B3 / ESP32S3 BOX3，使用 320×240 横屏，并通过
-USB CDC 与 Mac 通信。BLE 和 Wi-Fi fallback 已列入[路线图](./docs/ROADMAP.md)。
+当前硬件目标是正点原子 ATK-DNESP32S3B3 / ESP32S3 BOX3，使用 320×240 横屏。0.3.0-dev
+正在实现 USB CDC 优先、安全 BLE fallback 和双传输仲裁；代码与离线构建已经贯通，真机
+配对、切换与稳定性验收尚未完成。具体边界见 [0.3.0 规格](./docs/versions/0.3.0/SPEC.md)，
+Wi-Fi fallback 仍在[路线图](./docs/ROADMAP.md)。
 
 ## 实机效果
 
@@ -20,6 +22,7 @@ USB CDC 与 Mac 通信。BLE 和 Wi-Fi fallback 已列入[路线图](./docs/ROAD
 - 执行时间由设备持续更新，新事件到达时自动校准；未知进度使用平滑循环动画。
 - 支持触摸切换摘要与详情、自动返回、暗屏唤醒和断线状态提示。
 - 自动发现 USB 设备，并处理握手、ACK/重试、心跳、热插拔和会话恢复。
+- 0.3.0-dev 可选支持 BLE：K2 本地配对授权、加密绑定、USB 优先自动切换和手动暂停重连。
 - Agent 事件在 Mac 上归一化和脱敏，不向设备发送隐藏思维链或完整工具输出。
 - 内置常用简体中文字库，任务标题和固定文案可直接显示中文。
 
@@ -29,7 +32,7 @@ USB CDC 与 Mac 通信。BLE 和 Wi-Fi fallback 已列入[路线图](./docs/ROAD
 Codex lifecycle hooks
         │  本地 Unix Domain Socket
         ▼
-saki-host on macOS ── USB CDC / NDJSON ── ESP32-S3 firmware ── LCD
+saki-host on macOS ── USB CDC / BLE GATT + NDJSON ── ESP32-S3 firmware ── LCD
 ```
 
 Mac Host 负责采集事件、脱敏、状态合并、设备发现和连接恢复；设备固件负责协议校验、状态
@@ -48,6 +51,12 @@ cd saki
 
 python3.12 -m venv host/.venv
 host/.venv/bin/pip install -e 'host[dev]'
+```
+
+需要开发和验证 0.3 BLE 时安装可选依赖：
+
+```zsh
+host/.venv/bin/pip install -e 'host[dev,ble]'
 ```
 
 构建脚本会从仓库布局推导 ESP-IDF 路径；如果 IDF 安装在其他位置，先设置：
@@ -114,7 +123,7 @@ scripts/build-firmware-tests.zsh
 ```
 
 需要独占串口进行手工发送、回放或测试时，先停止常驻服务，完成后再启动。详细命令和故障
-排查见[用户指南](./docs/versions/0.2.0/USER_GUIDE.md)。
+排查见[0.3.0 用户指南](./docs/versions/0.3.0/USER_GUIDE.md)。
 
 ## 项目结构
 
@@ -127,11 +136,12 @@ scripts/build-firmware-tests.zsh
 ## 文档
 
 - [文档索引](./docs/README.md)
-- [产品与通信规格](./docs/versions/0.2.0/SPEC.md)
-- [工程实施设计](./docs/versions/0.2.0/IMPLEMENTATION.md)
-- [实施任务与验证记录](./docs/versions/0.2.0/TASKS.md)
-- [用户安装与排障指南](./docs/versions/0.2.0/USER_GUIDE.md)
+- [0.3.0 产品与通信规格](./docs/versions/0.3.0/SPEC.md)
+- [0.3.0 工程实施设计](./docs/versions/0.3.0/IMPLEMENTATION.md)
+- [0.3.0 实施任务与验证记录](./docs/versions/0.3.0/TASKS.md)
+- [0.3.0 用户安装与排障指南](./docs/versions/0.3.0/USER_GUIDE.md)
 - [发布说明](./docs/releases/0.2.0.md)
+- [0.2.0 已发布文档](./docs/versions/0.2.0/SPEC.md)
 - [后续路线图](./docs/ROADMAP.md)
 
 ## 许可证与项目名称

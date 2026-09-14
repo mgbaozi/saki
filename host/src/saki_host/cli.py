@@ -14,6 +14,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
+from .ble_binding import (
+    DEFAULT_BLE_BINDING_PATH,
+    BleBinding,
+    BleBindingError,
+    BleBindingStore,
+)
 from .codex_hooks import snapshot_from_codex_hook
 from .fuzz import build_fuzz_cases
 from .ipc import DEFAULT_SOCKET_PATH, HookDeliveryError, deliver_snapshot
@@ -35,11 +41,21 @@ from .protocol import (
     decode_frame,
     encode_frame,
 )
+from .protocol_session import ProtocolSession, ProtocolSessionError
 from .service import (
     SakiHostService,
     ServiceConfig,
+    ServiceTransportMode,
     parse_device_diagnostics,
     parse_device_runtime,
+)
+from .transports.ble import (
+    DEFAULT_BLE_SCAN_SECONDS,
+    BleByteTransport,
+    BleCandidate,
+    BleDependencyError,
+    BleDiscoveryError,
+    discover_saki_devices,
 )
 from .transports.serial import (
     SAKI_PRODUCT,
@@ -56,6 +72,7 @@ MIN_INTERNAL_HEAP_BYTES = 32 * 1024
 MIN_TASK_STACK_BYTES = 1024
 HOLD_HEARTBEAT_SECONDS = 5.0
 SOAK_MAX_UPDATE_INTERVAL_SECONDS = 10.0
+_BLE_CAPABILITIES = frozenset({"ble", "secure-connection", "transport-arbitration"})
 
 
 class ReplayError(ValueError):
@@ -77,6 +94,21 @@ def _hold_serial_session(
         remaining -= delay
         if remaining > 0:
             session.ping(codec.ping())
+
+
+async def _hold_protocol_session(
+    session: ProtocolSession,
+    hold: float,
+    *,
+    heartbeat_seconds: float = HOLD_HEARTBEAT_SECONDS,
+) -> None:
+    remaining = hold
+    while remaining > 0:
+        delay = min(heartbeat_seconds, remaining)
+        await asyncio.sleep(delay)
+        remaining -= delay
+        if remaining > 0:
+            await session.ping()
 
 
 def _nearest_rank(values: list[float], percentile: float) -> float:
@@ -247,9 +279,13 @@ def _run_service(
     socket_path: Path,
     heartbeat: float,
     stale_after: float,
+    transport: ServiceTransportMode = ServiceTransportMode.AUTO,
+    ble_binding_path: Path = DEFAULT_BLE_BINDING_PATH,
 ) -> int:
     config = ServiceConfig(
         port=port,
+        transport=transport,
+        ble_binding_path=ble_binding_path,
         socket_path=socket_path,
         heartbeat_seconds=heartbeat,
         stale_after_seconds=stale_after,
@@ -258,7 +294,15 @@ def _run_service(
         asyncio.run(SakiHostService(config).run())
     except KeyboardInterrupt:
         return 0
-    except (OSError, HookDeliveryError, SerialSessionError) as exc:
+    except (
+        BleBindingError,
+        BleDependencyError,
+        BleDiscoveryError,
+        HookDeliveryError,
+        OSError,
+        ProtocolSessionError,
+        SerialSessionError,
+    ) as exc:
         print(f"service failed: {exc}", file=sys.stderr)
         return 1
     return 0
@@ -283,7 +327,478 @@ def _run_serial_list() -> int:
     return 0
 
 
-def _run_doctor(port: str | None) -> int:
+async def _ble_list(timeout: float) -> int:
+    candidates = await discover_saki_devices(timeout=timeout)
+    if not candidates:
+        print("No Saki BLE devices found.")
+        return 0
+    for candidate in candidates:
+        print(
+            f"saki   {candidate.identifier} rssi={candidate.rssi} "
+            f"name={candidate.name}"
+        )
+    return 0
+
+
+def _run_ble_list(timeout: float) -> int:
+    try:
+        return asyncio.run(_ble_list(timeout))
+    except (BleDependencyError, BleDiscoveryError) as exc:
+        print(f"BLE scan failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _select_ble_candidate(
+    candidates: list[BleCandidate],
+    identifier: str | None,
+) -> BleCandidate:
+    if identifier is not None:
+        matches = [item for item in candidates if item.identifier == identifier]
+        if not matches:
+            raise BleDiscoveryError("selected Saki BLE device is not visible")
+        return matches[0]
+    if not candidates:
+        raise BleDiscoveryError(
+            "no Saki BLE device found; hold K2 for 2 seconds and release before 5 seconds"
+        )
+    if len(candidates) > 1:
+        raise BleDiscoveryError("multiple Saki BLE devices found; select one with --device")
+    return candidates[0]
+
+
+async def _ble_pair(identifier: str | None, timeout: float, binding_path: Path) -> int:
+    candidates = await discover_saki_devices(
+        timeout=min(timeout, DEFAULT_BLE_SCAN_SECONDS)
+    )
+    candidate = _select_ble_candidate(candidates, identifier)
+    transport = BleByteTransport(
+        candidate.device,
+        connect_timeout=timeout,
+        pair=True,
+    )
+    session = ProtocolSession(transport, response_timeout=2.0, retry_count=2)
+    try:
+        await session.connect()
+        hello = await session.handshake(
+            timeout=timeout,
+            required_capabilities=frozenset(
+                {"ble", "secure-connection", "transport-arbitration"}
+            ),
+        )
+        ack = await session.apply_status(StateSnapshot(state=AgentState.IDLE))
+        device = hello["device"]
+        device_id = str(device["id"])
+        BleBindingStore(binding_path).save(BleBinding(candidate.identifier, device_id))
+        print(
+            f"paired device=…{device_id[-4:]} firmware={device.get('fw', '-')} "
+            f"applied={ack.get('applied')}"
+        )
+    finally:
+        await session.close()
+    return 0
+
+
+def _run_ble_pair(
+    identifier: str | None,
+    timeout: float,
+    binding_path: Path = DEFAULT_BLE_BINDING_PATH,
+) -> int:
+    try:
+        return asyncio.run(_ble_pair(identifier, timeout, binding_path))
+    except (
+        BleBindingError,
+        BleDependencyError,
+        BleDiscoveryError,
+        ProtocolSessionError,
+    ) as exc:
+        print(f"BLE pairing failed: {exc}", file=sys.stderr)
+        return 1
+
+
+async def _ble_cycle(
+    count: int,
+    interval: float,
+    timeout: float,
+    binding_path: Path,
+) -> int:
+    service = SakiHostService(
+        ServiceConfig(
+            transport=ServiceTransportMode.BLE,
+            ble_binding_path=binding_path,
+            ble_scan_seconds=timeout,
+        )
+    )
+    durations_ms: list[float] = []
+
+    for cycle in range(1, count + 1):
+        link = None
+        try:
+            started = time.monotonic()
+            link = await service._connect_ble_link()
+            duration_ms = (time.monotonic() - started) * 1000
+            durations_ms.append(duration_ms)
+            print(
+                f"cycle={cycle}/{count} device=…{link.device_id[-4:]} "
+                f"handshake_ms={duration_ms:.1f}"
+            )
+        finally:
+            await service._close_link(link)
+        if cycle < count and interval:
+            await asyncio.sleep(interval)
+
+    print(
+        f"completed BLE cycles={count} failures=0 "
+        f"handshake_ms_min={min(durations_ms):.1f} "
+        f"handshake_ms_avg={sum(durations_ms) / len(durations_ms):.1f} "
+        f"handshake_ms_max={max(durations_ms):.1f}"
+    )
+    return 0
+
+
+def _run_ble_cycle(
+    count: int,
+    interval: float,
+    timeout: float,
+    binding_path: Path = DEFAULT_BLE_BINDING_PATH,
+) -> int:
+    try:
+        return asyncio.run(_ble_cycle(count, interval, timeout, binding_path))
+    except (
+        BleBindingError,
+        BleDependencyError,
+        BleDiscoveryError,
+        ProtocolSessionError,
+    ) as exc:
+        print(f"BLE cycle failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _ble_diagnostic_counter(message: dict[str, object], key: str) -> int:
+    diagnostics = message.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        raise ProtocolSessionError("device pong has no diagnostics object")
+    value = diagnostics.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProtocolSessionError(f"device pong has invalid diagnostics.{key}")
+    return value
+
+
+async def _ble_fuzz(
+    count: int,
+    seed: int,
+    delay: float,
+    timeout: float,
+    binding_path: Path,
+) -> int:
+    cases = build_fuzz_cases(count, seed)
+    service = SakiHostService(
+        ServiceConfig(
+            transport=ServiceTransportMode.BLE,
+            ble_binding_path=binding_path,
+            ble_scan_seconds=timeout,
+        )
+    )
+    link = None
+    try:
+        link = await service._connect_ble_link()
+        baseline = await link.session.ping()
+        invalid_before = _ble_diagnostic_counter(baseline, "invalid_frames")
+        oversized_before = _ble_diagnostic_counter(baseline, "oversized_frames")
+        byte_count = 0
+        drained_bytes = 0
+
+        for case in cases:
+            for chunk in case.chunks:
+                await link.session.write_raw(chunk)
+                byte_count += len(chunk)
+            if delay:
+                await asyncio.sleep(delay)
+            drained_bytes += await link.session.drain_input(
+                quiet_seconds=0.03,
+                timeout=0.5,
+            )
+
+        drained_bytes += await link.session.drain_input(quiet_seconds=0.25, timeout=2.0)
+        recovered_hello = await link.session.handshake(
+            timeout=timeout,
+            required_capabilities=_BLE_CAPABILITIES,
+        )
+        recovered_ack = await link.session.apply_status(StateSnapshot(state=AgentState.IDLE))
+        recovered_pong = await link.session.ping()
+
+        invalid_delta = (
+            _ble_diagnostic_counter(recovered_pong, "invalid_frames") - invalid_before
+        )
+        oversized_delta = (
+            _ble_diagnostic_counter(recovered_pong, "oversized_frames") - oversized_before
+        )
+        device = recovered_hello["device"]
+        device_id = str(device["id"])
+        print(
+            f"BLE fuzzed device=…{device_id[-4:]} firmware={device.get('fw', '-')} "
+            f"cases={len(cases)} random_cases={count} seed={seed} bytes={byte_count}"
+        )
+        print(
+            f"diagnostics invalid_delta={invalid_delta} oversized_delta={oversized_delta} "
+            f"tx_drops={_ble_diagnostic_counter(recovered_pong, 'tx_drops')} "
+            f"drained_response_bytes={drained_bytes}"
+        )
+        if invalid_delta <= 0 or oversized_delta <= 0:
+            print(
+                "BLE fuzz failed: device diagnostics did not observe the invalid corpus",
+                file=sys.stderr,
+            )
+            return 1
+        if recovered_ack.get("applied") is not True:
+            print(
+                "BLE fuzz failed: valid recovery status was not applied",
+                file=sys.stderr,
+            )
+            return 1
+        print("recovery=PASS handshake=true valid_status=true heartbeat=true")
+        return 0
+    finally:
+        await service._close_link(link)
+
+
+def _run_ble_fuzz(
+    count: int,
+    seed: int,
+    delay: float,
+    timeout: float,
+    binding_path: Path = DEFAULT_BLE_BINDING_PATH,
+) -> int:
+    try:
+        return asyncio.run(_ble_fuzz(count, seed, delay, timeout, binding_path))
+    except (
+        BleBindingError,
+        BleDependencyError,
+        BleDiscoveryError,
+        ProtocolSessionError,
+        ValueError,
+    ) as exc:
+        print(f"BLE fuzz failed: {exc}", file=sys.stderr)
+        return 1
+
+
+async def _ble_soak(
+    count: int,
+    duration: float,
+    sample_interval: float,
+    timeout: float,
+    binding_path: Path,
+    report_path: Path,
+) -> int:
+    started_at = datetime.now(UTC).isoformat()
+    completed = 0
+    ack_latencies_ms: list[float] = []
+    samples: list[dict[str, object]] = []
+    error: str | None = None
+    device: dict[str, object] = {}
+    run_started = time.monotonic()
+    service = SakiHostService(
+        ServiceConfig(
+            transport=ServiceTransportMode.BLE,
+            ble_binding_path=binding_path,
+            ble_scan_seconds=timeout,
+        )
+    )
+    link = None
+
+    try:
+        link = await service._connect_ble_link()
+        device = {"id_suffix": link.device_id[-4:]}
+        run_started = time.monotonic()
+        initial_pong = await link.session.ping()
+        samples.append(
+            {
+                "elapsed_seconds": 0.0,
+                "completed_updates": 0,
+                "diagnostics": parse_device_diagnostics(initial_pong),
+                "runtime": parse_device_runtime(initial_pong),
+            }
+        )
+        next_sample = run_started + sample_interval
+        progress_interval = max(1, count // 20)
+
+        for index in range(1, count + 1):
+            target = (
+                run_started + duration * ((index - 1) / (count - 1))
+                if count > 1
+                else run_started
+            )
+            delay = target - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            before_ack = time.monotonic()
+            ack = await link.session.apply_status(
+                _soak_snapshot(index, int((before_ack - run_started) * 1000))
+            )
+            after_ack = time.monotonic()
+            if ack.get("applied") is not True:
+                raise ProtocolSessionError(f"BLE soak update {index} was not applied")
+            ack_latencies_ms.append((after_ack - before_ack) * 1000)
+            completed = index
+
+            if after_ack >= next_sample or index == count:
+                pong = await link.session.ping()
+                samples.append(
+                    {
+                        "elapsed_seconds": time.monotonic() - run_started,
+                        "completed_updates": completed,
+                        "diagnostics": parse_device_diagnostics(pong),
+                        "runtime": parse_device_runtime(pong),
+                    }
+                )
+                while next_sample <= after_ack:
+                    next_sample += sample_interval
+
+            if index % progress_interval == 0 or index == count:
+                print(
+                    f"BLE soak progress={index}/{count} "
+                    f"elapsed_seconds={time.monotonic() - run_started:.1f}",
+                    flush=True,
+                )
+    except (
+        BleBindingError,
+        BleDependencyError,
+        BleDiscoveryError,
+        OSError,
+        ProtocolSessionError,
+        ValueError,
+    ) as exc:
+        error = str(exc)
+    finally:
+        await service._close_link(link)
+
+    diagnostics_start = samples[0].get("diagnostics") if samples else None
+    diagnostics_end = samples[-1].get("diagnostics") if samples else None
+    diagnostic_delta: dict[str, int] | None = None
+    if isinstance(diagnostics_start, dict) and isinstance(diagnostics_end, dict):
+        diagnostic_delta = {
+            key: max(0, int(diagnostics_end[key]) - int(diagnostics_start[key]))
+            for key in diagnostics_start
+        }
+
+    runtime_start = samples[0].get("runtime") if samples else None
+    runtime_end = samples[-1].get("runtime") if samples else None
+    runtime_delta: dict[str, int] | None = None
+    observed_keys = (
+        "ble_rx_drops",
+        "ble_tx_drops",
+        "ble_security_rejections",
+        "ble_pairing_rejections",
+        "ble_disconnects",
+        "transport_rejections",
+    )
+    if (
+        isinstance(runtime_start, dict)
+        and isinstance(runtime_end, dict)
+        and all(key in runtime_start and key in runtime_end for key in observed_keys)
+    ):
+        runtime_delta = {
+            key: max(0, int(runtime_end[key]) - int(runtime_start[key]))
+            for key in observed_keys
+        }
+
+    runtime_safe = isinstance(runtime_end, dict) and "ble_stack_min_bytes" in runtime_end and (
+        int(runtime_end["internal_min_bytes"]) >= MIN_INTERNAL_HEAP_BYTES
+        and all(
+            int(runtime_end[key]) >= MIN_TASK_STACK_BYTES
+            for key in (
+                "app_stack_min_bytes",
+                "ui_stack_min_bytes",
+                "usb_stack_min_bytes",
+                "ble_stack_min_bytes",
+            )
+        )
+    )
+    diagnostics_clean = isinstance(diagnostic_delta, dict) and all(
+        diagnostic_delta.get(key, 0) == 0
+        for key in (
+            "invalid_frames",
+            "oversized_frames",
+            "old_sequences",
+            "ui_queue_overwrites",
+            "tx_drops",
+            "heartbeat_timeouts",
+        )
+    )
+    runtime_clean = isinstance(runtime_delta, dict) and all(
+        value == 0 for value in runtime_delta.values()
+    )
+    passed = (
+        error is None
+        and completed == count
+        and diagnostics_clean
+        and runtime_clean
+        and runtime_safe
+    )
+    finished_at = datetime.now(UTC).isoformat()
+    report: dict[str, object] = {
+        "schema_version": 1,
+        "transport": "ble",
+        "result": "pass" if passed else "fail",
+        "error": error,
+        "started_at_utc": started_at,
+        "finished_at_utc": finished_at,
+        "requested_duration_seconds": duration,
+        "actual_duration_seconds": time.monotonic() - run_started,
+        "requested_updates": count,
+        "completed_updates": completed,
+        "sample_interval_seconds": sample_interval,
+        "device": device,
+        "ack_latency_ms": _latency_summary(ack_latencies_ms) if ack_latencies_ms else None,
+        "diagnostic_delta": diagnostic_delta,
+        "runtime_delta": runtime_delta,
+        "runtime_safe": runtime_safe,
+        "host_max_rss_bytes": _host_max_rss_bytes(),
+        "samples": samples,
+    }
+    _write_soak_report(report_path, report)
+
+    if passed:
+        latency = report["ack_latency_ms"]
+        assert isinstance(latency, dict)
+        print(
+            f"BLE soak PASS updates={completed} ack_mean_ms={latency['mean']:.1f} "
+            f"ack_p95_ms={latency['p95']:.1f} report={report_path}"
+        )
+        return 0
+    print(
+        f"BLE soak FAIL updates={completed}/{count} error={error or 'health check'}",
+        file=sys.stderr,
+    )
+    print(f"partial report={report_path}", file=sys.stderr)
+    return 1
+
+
+def _run_ble_soak(
+    count: int,
+    duration: float,
+    sample_interval: float,
+    timeout: float,
+    binding_path: Path,
+    report_path: Path,
+) -> int:
+    try:
+        return asyncio.run(
+            _ble_soak(
+                count,
+                duration,
+                sample_interval,
+                timeout,
+                binding_path,
+                report_path,
+            )
+        )
+    except KeyboardInterrupt:
+        print("BLE soak interrupted", file=sys.stderr)
+        return 130
+
+
+def _run_usb_doctor(port: str | None) -> int:
     print(
         f"PASS host: saki-host {__version__}, Python "
         f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}, "
@@ -385,6 +900,107 @@ def _run_doctor(port: str | None) -> int:
         print(f"PASS runtime: {summary}")
     print("RESULT: healthy")
     return 0
+
+
+async def _ble_doctor(binding_path: Path) -> int:
+    service = SakiHostService(
+        ServiceConfig(
+            transport=ServiceTransportMode.BLE,
+            ble_binding_path=binding_path,
+        )
+    )
+    link = None
+    att_mtu: int | None = None
+    write_payload_bytes = 20
+    try:
+        started = time.monotonic()
+        link = await service._connect_ble_link()
+        handshake_ms = (time.monotonic() - started) * 1000
+        att_mtu = getattr(link.session.transport, "negotiated_att_mtu", None)
+        write_payload_bytes = int(
+            getattr(link.session.transport, "write_payload_bytes", write_payload_bytes)
+        )
+        ping_started = time.monotonic()
+        pong = await link.session.ping()
+        ping_ms = (time.monotonic() - ping_started) * 1000
+    except (
+        BleBindingError,
+        BleDependencyError,
+        BleDiscoveryError,
+        ProtocolSessionError,
+    ) as exc:
+        print(f"FAIL BLE: {exc}")
+        print("RESULT: unhealthy")
+        return 1
+    finally:
+        await service._close_link(link)
+
+    print(
+        f"PASS BLE handshake: device=…{link.device_id[-4:]} "
+        f"handshake_ms={handshake_ms:.1f}"
+    )
+    print(
+        f"PASS BLE GATT: att_mtu={att_mtu if att_mtu is not None else 'unknown'} "
+        f"write_payload_bytes={write_payload_bytes}"
+    )
+    print(
+        f"PASS BLE heartbeat: uptime_ms={pong.get('uptime_ms')} "
+        f"last_seq={pong.get('last_seq')} ping_ms={ping_ms:.1f} "
+        f"diagnostics={pong.get('diagnostics', {})}"
+    )
+    runtime = parse_device_runtime(pong)
+    if runtime is None:
+        print("WARN runtime: metrics unavailable")
+    else:
+        failures: list[str] = []
+        if runtime["internal_min_bytes"] < MIN_INTERNAL_HEAP_BYTES:
+            failures.append(
+                f"internal_min_bytes={runtime['internal_min_bytes']}<{MIN_INTERNAL_HEAP_BYTES}"
+            )
+        stack_keys = ["app_stack_min_bytes", "ui_stack_min_bytes", "usb_stack_min_bytes"]
+        if "ble_stack_min_bytes" in runtime:
+            stack_keys.append("ble_stack_min_bytes")
+        failures.extend(
+            f"{key}={runtime[key]}<{MIN_TASK_STACK_BYTES}"
+            for key in stack_keys
+            if runtime[key] < MIN_TASK_STACK_BYTES
+        )
+        summary = " ".join(f"{key}={value}" for key, value in runtime.items())
+        if failures:
+            print(f"FAIL runtime: {summary}")
+            print(f"Safety limits: {', '.join(failures)}")
+            print("RESULT: unhealthy")
+            return 1
+        print(f"PASS runtime: {summary}")
+    print("RESULT: healthy")
+    return 0
+
+
+def _run_doctor(
+    port: str | None,
+    transport: ServiceTransportMode = ServiceTransportMode.USB,
+    ble_binding_path: Path = DEFAULT_BLE_BINDING_PATH,
+) -> int:
+    mode = ServiceTransportMode(transport)
+    if mode is ServiceTransportMode.USB:
+        return _run_usb_doctor(port)
+    if mode is ServiceTransportMode.AUTO:
+        candidates = list_candidates()
+        if port is not None or any(candidate.looks_like_saki for candidate in candidates):
+            return _run_usb_doctor(port)
+        print(
+            f"PASS host: saki-host {__version__}, Python "
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}, "
+            f"protocol v{PROTOCOL_VERSION}"
+        )
+        print("INFO USB unavailable; checking verified BLE binding")
+    else:
+        print(
+            f"PASS host: saki-host {__version__}, Python "
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}, "
+            f"protocol v{PROTOCOL_VERSION}"
+        )
+    return asyncio.run(_ble_doctor(ble_binding_path))
 
 
 def _run_serial_demo(port: str | None, interval: float, hold: float) -> int:
@@ -690,6 +1306,49 @@ def _run_serial_send(port: str | None, snapshot: StateSnapshot, hold: float) -> 
     return 0
 
 
+async def _ble_send(
+    snapshot: StateSnapshot,
+    hold: float,
+    binding_path: Path,
+) -> int:
+    service = SakiHostService(
+        ServiceConfig(
+            transport=ServiceTransportMode.BLE,
+            ble_binding_path=binding_path,
+        )
+    )
+    link = None
+    try:
+        link = await service._connect_ble_link()
+        ack = await link.session.apply_status(snapshot)
+        print(
+            f"sent state={snapshot.state.value} device=…{link.device_id[-4:]} "
+            f"transport=ble applied={ack.get('applied')} last_seq={ack.get('last_seq')}"
+        )
+        if hold:
+            await _hold_protocol_session(link.session, hold)
+        return 0
+    finally:
+        await service._close_link(link)
+
+
+def _run_ble_send(
+    snapshot: StateSnapshot,
+    hold: float,
+    binding_path: Path = DEFAULT_BLE_BINDING_PATH,
+) -> int:
+    try:
+        return asyncio.run(_ble_send(snapshot, hold, binding_path))
+    except (
+        BleBindingError,
+        BleDependencyError,
+        BleDiscoveryError,
+        ProtocolSessionError,
+    ) as exc:
+        print(f"BLE send failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def _load_sanitized_replay(path: Path) -> list[StateSnapshot | None]:
     fixture_root = SANITIZED_REPLAY_ROOT.resolve()
     resolved = path.expanduser().resolve()
@@ -773,14 +1432,104 @@ def _run_serial_replay(port: str | None, path: Path, interval: float, hold: floa
     return 0
 
 
+async def _ble_replay(
+    path: Path,
+    steps: list[StateSnapshot | None],
+    interval: float,
+    hold: float,
+    binding_path: Path,
+) -> int:
+    service = SakiHostService(
+        ServiceConfig(
+            transport=ServiceTransportMode.BLE,
+            ble_binding_path=binding_path,
+        )
+    )
+    link = None
+    try:
+        link = await service._connect_ble_link()
+        print(
+            f"replaying file={path.name} steps={len(steps)} "
+            f"device=…{link.device_id[-4:]} transport=ble"
+        )
+        for index, snapshot in enumerate(steps, start=1):
+            ack_started = time.monotonic()
+            if snapshot is None:
+                ack = await link.session.apply_clear()
+                state_name = "clear"
+            else:
+                ack = await link.session.apply_status(snapshot)
+                state_name = snapshot.state.value
+            ack_ms = (time.monotonic() - ack_started) * 1000
+            print(
+                f"step={index}/{len(steps)} state={state_name} "
+                f"applied={ack.get('applied')} last_seq={ack.get('last_seq')} "
+                f"ack_ms={ack_ms:.1f}"
+            )
+            if index < len(steps) and interval:
+                await asyncio.sleep(interval)
+        if hold:
+            await _hold_protocol_session(link.session, hold)
+        return 0
+    finally:
+        await service._close_link(link)
+
+
+def _run_ble_replay(
+    path: Path,
+    interval: float,
+    hold: float,
+    binding_path: Path = DEFAULT_BLE_BINDING_PATH,
+) -> int:
+    try:
+        steps = _load_sanitized_replay(path)
+    except ReplayError as exc:
+        print(f"replay rejected: {exc}", file=sys.stderr)
+        return 2
+    try:
+        return asyncio.run(_ble_replay(path, steps, interval, hold, binding_path))
+    except (
+        BleBindingError,
+        BleDependencyError,
+        BleDiscoveryError,
+        ProtocolSessionError,
+    ) as exc:
+        print(f"BLE replay failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="saki-host")
     subparsers = parser.add_subparsers(dest="command", required=True)
     doctor = subparsers.add_parser("doctor", help="diagnose device discovery and protocol health")
     doctor.add_argument("--port", help="serial callout device; auto-detect by default")
+    doctor.add_argument(
+        "--transport",
+        choices=[mode.value for mode in ServiceTransportMode],
+        default=ServiceTransportMode.AUTO.value,
+        help="transport to diagnose; auto checks USB before verified BLE",
+    )
+    doctor.add_argument(
+        "--ble-binding",
+        type=Path,
+        default=DEFAULT_BLE_BINDING_PATH,
+        help="verified BLE binding cache path",
+    )
     subparsers.add_parser("demo", help="print a sanitized demo session as NDJSON")
     send = subparsers.add_parser("send", help="send one complete status snapshot to a device")
     send.add_argument("--port", help="serial callout device; auto-detect by default")
+    send.add_argument(
+        "--transport",
+        choices=(ServiceTransportMode.USB.value, ServiceTransportMode.BLE.value),
+        default=ServiceTransportMode.USB.value,
+        help="transport to use; defaults to usb for backward compatibility",
+    )
+    send.add_argument(
+        "--ble-binding",
+        type=Path,
+        default=DEFAULT_BLE_BINDING_PATH,
+        help="verified BLE binding cache path",
+    )
     send.add_argument("--state", required=True, choices=[state.value for state in AgentState])
     send.add_argument("--title", help="task title; required unless state is idle")
     send.add_argument("--task-id", default="manual", help="stable task identifier")
@@ -796,6 +1545,18 @@ def build_parser() -> argparse.ArgumentParser:
     replay = subparsers.add_parser("replay", help="replay a sanitized NDJSON fixture")
     replay.add_argument("path", type=Path, help="file under protocol/fixtures/v1/sessions")
     replay.add_argument("--port", help="serial callout device; auto-detect by default")
+    replay.add_argument(
+        "--transport",
+        choices=(ServiceTransportMode.USB.value, ServiceTransportMode.BLE.value),
+        default=ServiceTransportMode.USB.value,
+        help="transport to use; defaults to usb for backward compatibility",
+    )
+    replay.add_argument(
+        "--ble-binding",
+        type=Path,
+        default=DEFAULT_BLE_BINDING_PATH,
+        help="verified BLE binding cache path",
+    )
     replay.add_argument("--interval", type=float, default=0.8, help="seconds between states")
     replay.add_argument("--hold", type=float, default=3.0, help="seconds before closing the port")
     serial = subparsers.add_parser("serial", help="inspect serial transports")
@@ -851,6 +1612,101 @@ def build_parser() -> argparse.ArgumentParser:
     serial_soak.add_argument(
         "--report", type=Path, required=True, help="new JSON report path; existing files are refused"
     )
+    ble = subparsers.add_parser("ble", help="manage and diagnose Saki over Bluetooth LE")
+    ble_subparsers = ble.add_subparsers(dest="ble_command", required=True)
+    ble_list = ble_subparsers.add_parser("list", help="list visible Saki BLE peripherals")
+    ble_list.add_argument("--timeout", type=float, default=5.0, help="scan timeout in seconds")
+    ble_pair = ble_subparsers.add_parser(
+        "pair", help="pair during the device's K2 pairing window and verify the protocol"
+    )
+    ble_pair.add_argument("--device", help="CoreBluetooth peripheral UUID shown by `ble list`")
+    ble_pair.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="timeout for each BLE connect/security stage",
+    )
+    ble_pair.add_argument(
+        "--binding",
+        type=Path,
+        default=DEFAULT_BLE_BINDING_PATH,
+        help="verified BLE binding cache path",
+    )
+    ble_cycle = ble_subparsers.add_parser(
+        "cycle",
+        help="repeatedly connect, verify, and disconnect a bound Saki peripheral",
+    )
+    ble_cycle.add_argument("--count", type=int, default=20, help="number of BLE cycles")
+    ble_cycle.add_argument(
+        "--interval",
+        type=float,
+        default=0.5,
+        help="seconds between cycles",
+    )
+    ble_cycle.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="scan/connect timeout per cycle",
+    )
+    ble_cycle.add_argument(
+        "--binding",
+        type=Path,
+        default=DEFAULT_BLE_BINDING_PATH,
+        help="verified BLE binding cache path",
+    )
+    ble_fuzz = ble_subparsers.add_parser(
+        "fuzz",
+        help="inject a bounded invalid corpus over BLE and verify recovery",
+    )
+    ble_fuzz.add_argument(
+        "--count", type=int, default=32, help="number of deterministic random mutations"
+    )
+    ble_fuzz.add_argument("--seed", type=int, default=20260903, help="random corpus seed")
+    ble_fuzz.add_argument(
+        "--delay", type=float, default=0.01, help="seconds between injected cases"
+    )
+    ble_fuzz.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="BLE scan/connect timeout",
+    )
+    ble_fuzz.add_argument(
+        "--binding",
+        type=Path,
+        default=DEFAULT_BLE_BINDING_PATH,
+        help="verified BLE binding cache path",
+    )
+    ble_soak = ble_subparsers.add_parser(
+        "soak",
+        help="run a bounded BLE status, diagnostics, and resource test",
+    )
+    ble_soak.add_argument("--count", type=int, default=100, help="number of status updates")
+    ble_soak.add_argument(
+        "--duration", type=float, default=10, help="scheduled test duration in seconds"
+    )
+    ble_soak.add_argument(
+        "--sample-interval",
+        type=float,
+        default=5,
+        help="seconds between device diagnostic/runtime samples",
+    )
+    ble_soak.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="BLE scan/connect timeout",
+    )
+    ble_soak.add_argument(
+        "--binding",
+        type=Path,
+        default=DEFAULT_BLE_BINDING_PATH,
+        help="verified BLE binding cache path",
+    )
+    ble_soak.add_argument(
+        "--report", type=Path, required=True, help="new JSON report path; existing files are refused"
+    )
     hook = subparsers.add_parser("hook", help="map one Codex hook JSON object to a status")
     hook.add_argument("event", help="Codex hook event name")
     hook.add_argument(
@@ -860,6 +1716,18 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--strict", action="store_true", help="fail if the Host service is offline")
     serve = subparsers.add_parser("serve", help="run the hook receiver and persistent device session")
     serve.add_argument("--port", help="serial callout device; auto-detect by default")
+    serve.add_argument(
+        "--transport",
+        choices=[mode.value for mode in ServiceTransportMode],
+        default=ServiceTransportMode.AUTO.value,
+        help="transport policy; auto prefers USB and falls back to verified BLE",
+    )
+    serve.add_argument(
+        "--ble-binding",
+        type=Path,
+        default=DEFAULT_BLE_BINDING_PATH,
+        help="verified BLE binding cache path",
+    )
     serve.add_argument(
         "--socket", type=Path, default=DEFAULT_SOCKET_PATH, help="Unix socket for hook events"
     )
@@ -878,10 +1746,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "doctor":
-        return _run_doctor(args.port)
+        if args.transport == ServiceTransportMode.BLE.value and args.port is not None:
+            print("--port cannot be used with --transport ble", file=sys.stderr)
+            return 2
+        return _run_doctor(
+            args.port,
+            ServiceTransportMode(args.transport),
+            args.ble_binding,
+        )
     if args.command == "demo":
         return _run_demo()
     if args.command == "send":
+        if args.transport == ServiceTransportMode.BLE.value and args.port is not None:
+            print("--port cannot be used with --transport ble", file=sys.stderr)
+            return 2
         state = AgentState(args.state)
         if state is not AgentState.IDLE and not args.title:
             print("--title is required unless --state is idle", file=sys.stderr)
@@ -917,11 +1795,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             elapsed_ms=args.elapsed_ms,
             agent=AgentInfo(args.agent, args.model),
         )
+        if args.transport == ServiceTransportMode.BLE.value:
+            return _run_ble_send(snapshot, args.hold, args.ble_binding)
         return _run_serial_send(args.port, snapshot, args.hold)
     if args.command == "replay":
         if args.interval < 0 or args.hold < 0:
             print("--interval and --hold cannot be negative", file=sys.stderr)
             return 2
+        if args.transport == ServiceTransportMode.BLE.value and args.port is not None:
+            print("--port cannot be used with --transport ble", file=sys.stderr)
+            return 2
+        if args.transport == ServiceTransportMode.BLE.value:
+            return _run_ble_replay(
+                args.path,
+                args.interval,
+                args.hold,
+                args.ble_binding,
+            )
         return _run_serial_replay(args.port, args.path, args.interval, args.hold)
     if args.command == "hook":
         return _run_hook(args.event, args.socket, args.stdout, args.strict)
@@ -932,7 +1822,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.stale_after < 0:
             print("--stale-after cannot be negative", file=sys.stderr)
             return 2
-        return _run_service(args.port, args.socket, args.heartbeat, args.stale_after)
+        return _run_service(
+            args.port,
+            args.socket,
+            args.heartbeat,
+            args.stale_after,
+            ServiceTransportMode(args.transport),
+            args.ble_binding,
+        )
     if args.command == "serial" and args.serial_command == "list":
         return _run_serial_list()
     if args.command == "serial" and args.serial_command == "demo":
@@ -976,6 +1873,78 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.count,
             args.duration,
             args.sample_interval,
+            args.report,
+        )
+    if args.command == "ble" and args.ble_command == "list":
+        if args.timeout <= 0:
+            print("--timeout must be positive", file=sys.stderr)
+            return 2
+        return _run_ble_list(args.timeout)
+    if args.command == "ble" and args.ble_command == "pair":
+        if args.timeout <= 0:
+            print("--timeout must be positive", file=sys.stderr)
+            return 2
+        return _run_ble_pair(args.device, args.timeout, args.binding)
+    if args.command == "ble" and args.ble_command == "cycle":
+        if args.count <= 0 or args.interval < 0 or args.timeout <= 0:
+            print(
+                "--count and --timeout must be positive; --interval cannot be negative",
+                file=sys.stderr,
+            )
+            return 2
+        return _run_ble_cycle(
+            args.count,
+            args.interval,
+            args.timeout,
+            args.binding,
+        )
+    if args.command == "ble" and args.ble_command == "fuzz":
+        if args.count < 0 or args.delay < 0 or args.timeout <= 0:
+            print(
+                "--count and --delay cannot be negative; --timeout must be positive",
+                file=sys.stderr,
+            )
+            return 2
+        return _run_ble_fuzz(
+            args.count,
+            args.seed,
+            args.delay,
+            args.timeout,
+            args.binding,
+        )
+    if args.command == "ble" and args.ble_command == "soak":
+        if (
+            args.count <= 0
+            or args.duration < 0
+            or args.sample_interval <= 0
+            or args.timeout <= 0
+        ):
+            print(
+                "--count, --sample-interval and --timeout must be positive; "
+                "--duration cannot be negative",
+                file=sys.stderr,
+            )
+            return 2
+        if args.count == 1 and args.duration > 0:
+            print("--count must be at least 2 when --duration is positive", file=sys.stderr)
+            return 2
+        update_interval = args.duration / max(1, args.count - 1)
+        if update_interval > SOAK_MAX_UPDATE_INTERVAL_SECONDS:
+            print(
+                f"scheduled update interval {update_interval:.3f}s exceeds the "
+                f"{SOAK_MAX_UPDATE_INTERVAL_SECONDS:.1f}s heartbeat-safe limit",
+                file=sys.stderr,
+            )
+            return 2
+        if args.report.exists():
+            print(f"--report already exists: {args.report}", file=sys.stderr)
+            return 2
+        return _run_ble_soak(
+            args.count,
+            args.duration,
+            args.sample_interval,
+            args.timeout,
+            args.binding,
             args.report,
         )
     return 2

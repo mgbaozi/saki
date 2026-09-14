@@ -349,6 +349,7 @@ static bool saki_protocol_parse_state_name(
 }
 
 static bool saki_protocol_parse_snapshot(
+    const saki_protocol_engine_t *engine,
     const cJSON *root,
     saki_state_snapshot_t *snapshot
 )
@@ -362,7 +363,12 @@ static bool saki_protocol_parse_snapshot(
 
     saki_state_snapshot_init(snapshot);
     snapshot->connected = true;
-    snprintf(snapshot->transport, sizeof(snapshot->transport), "%s", "USB");
+    snprintf(
+        snapshot->transport,
+        sizeof(snapshot->transport),
+        "%s",
+        saki_transport_name(engine->transport)
+    );
 
     if (!saki_protocol_parse_state_name(root, &snapshot->state) ||
         !saki_json_uint64_optional(root, "elapsed_ms", &snapshot->elapsed_ms)) {
@@ -519,13 +525,106 @@ static void saki_protocol_handle_hello(
         ",\"reply_to\":%" PRIu32
         ",\"role\":\"device\",\"device\":{\"name\":\"saki-box3\",\"fw\":\"%s\",\"id\":\"%s\"},"
         "\"screen\":{\"width\":320,\"height\":240},"
-        "\"capabilities\":[\"status\",\"progress\",\"utf8\",\"touch-detail\"]}\n",
+        "\"capabilities\":[\"status\",\"progress\",\"utf8\",\"touch-detail\"%s%s%s]}\n",
         saki_protocol_next_id(engine),
         request_id,
         engine->firmware_version,
-        engine->device_id
+        engine->device_id,
+        (engine->capability_flags & SAKI_PROTOCOL_CAPABILITY_BLE) != 0
+            ? ",\"ble\""
+            : "",
+        (engine->capability_flags & SAKI_PROTOCOL_CAPABILITY_SECURE_CONNECTION) != 0
+            ? ",\"secure-connection\""
+            : "",
+        (engine->capability_flags &
+         SAKI_PROTOCOL_CAPABILITY_TRANSPORT_ARBITRATION) != 0
+            ? ",\"transport-arbitration\""
+            : ""
     );
     (void)saki_protocol_send(engine, response, length);
+}
+
+static void saki_protocol_submit_snapshot(
+    saki_protocol_engine_t *engine,
+    const saki_state_snapshot_t *snapshot,
+    uint32_t request_id,
+    uint32_t sequence
+)
+{
+    saki_transport_outcome_t outcome;
+
+    if (engine->submit_candidate == NULL) {
+        if (engine->apply_state(snapshot, engine->callback_context) != ESP_OK) {
+            saki_protocol_send_error(
+                engine,
+                true,
+                request_id,
+                "busy",
+                "display queue is unavailable",
+                false
+            );
+            return;
+        }
+        engine->last_seq = sequence;
+        engine->has_last_seq = true;
+        engine->invalid_streak = 0;
+        saki_protocol_send_ack(engine, request_id, true);
+        return;
+    }
+
+    outcome = engine->submit_candidate(
+        snapshot,
+        engine->transport,
+        engine->session,
+        sequence,
+        engine->last_activity_ms,
+        engine->callback_context
+    );
+    if (outcome.has_last_seq) {
+        engine->last_seq = outcome.last_seq;
+        engine->has_last_seq = true;
+    }
+    engine->invalid_streak = 0;
+    switch (outcome.result) {
+    case SAKI_TRANSPORT_APPLIED:
+        saki_protocol_send_ack(engine, request_id, true);
+        break;
+    case SAKI_TRANSPORT_STALE:
+        saki_protocol_increment(&engine->diagnostics.old_sequences);
+        saki_protocol_send_ack(engine, request_id, false);
+        break;
+    case SAKI_TRANSPORT_BUSY:
+        saki_protocol_send_error(
+            engine,
+            true,
+            request_id,
+            "busy",
+            "higher-priority transport is active",
+            false
+        );
+        break;
+    case SAKI_TRANSPORT_APPLY_FAILED:
+        saki_protocol_send_error(
+            engine,
+            true,
+            request_id,
+            "busy",
+            "display queue is unavailable",
+            false
+        );
+        break;
+    case SAKI_TRANSPORT_INVALID:
+    default:
+        saki_protocol_send_error(
+            engine,
+            true,
+            request_id,
+            "invalid_field",
+            "transport candidate is invalid",
+            false
+        );
+        break;
+    }
 }
 
 static void saki_protocol_handle_status(
@@ -562,7 +661,8 @@ static void saki_protocol_handle_status(
         );
         return;
     }
-    if (!saki_protocol_seq_is_new(engine, sequence)) {
+    if (engine->submit_candidate == NULL &&
+        !saki_protocol_seq_is_new(engine, sequence)) {
         saki_protocol_increment(&engine->diagnostics.valid_frames);
         saki_protocol_increment(&engine->diagnostics.old_sequences);
         saki_protocol_mark_activity(engine);
@@ -604,7 +704,7 @@ static void saki_protocol_handle_status(
         );
         return;
     }
-    if (!saki_protocol_parse_snapshot(root, &snapshot)) {
+    if (!saki_protocol_parse_snapshot(engine, root, &snapshot)) {
         saki_protocol_send_error(
             engine,
             true,
@@ -618,21 +718,7 @@ static void saki_protocol_handle_status(
     saki_protocol_increment(&engine->diagnostics.valid_frames);
     saki_protocol_mark_activity(engine);
     snapshot.received_at_ms = engine->last_activity_ms;
-    if (engine->apply_state(&snapshot, engine->callback_context) != ESP_OK) {
-        saki_protocol_send_error(
-            engine,
-            true,
-            request_id,
-            "busy",
-            "display queue is unavailable",
-            false
-        );
-        return;
-    }
-    engine->last_seq = sequence;
-    engine->has_last_seq = true;
-    engine->invalid_streak = 0;
-    saki_protocol_send_ack(engine, request_id, true);
+    saki_protocol_submit_snapshot(engine, &snapshot, request_id, sequence);
 }
 
 static void saki_protocol_handle_clear(
@@ -667,7 +753,8 @@ static void saki_protocol_handle_clear(
         );
         return;
     }
-    if (!saki_protocol_seq_is_new(engine, sequence)) {
+    if (engine->submit_candidate == NULL &&
+        !saki_protocol_seq_is_new(engine, sequence)) {
         saki_protocol_increment(&engine->diagnostics.valid_frames);
         saki_protocol_increment(&engine->diagnostics.old_sequences);
         saki_protocol_mark_activity(engine);
@@ -681,22 +768,13 @@ static void saki_protocol_handle_clear(
     saki_state_snapshot_init(&snapshot);
     snapshot.connected = true;
     snapshot.received_at_ms = engine->last_activity_ms;
-    snprintf(snapshot.transport, sizeof(snapshot.transport), "%s", "USB");
-    if (engine->apply_state(&snapshot, engine->callback_context) != ESP_OK) {
-        saki_protocol_send_error(
-            engine,
-            true,
-            request_id,
-            "busy",
-            "display queue is unavailable",
-            false
-        );
-        return;
-    }
-    engine->last_seq = sequence;
-    engine->has_last_seq = true;
-    engine->invalid_streak = 0;
-    saki_protocol_send_ack(engine, request_id, true);
+    snprintf(
+        snapshot.transport,
+        sizeof(snapshot.transport),
+        "%s",
+        saki_transport_name(engine->transport)
+    );
+    saki_protocol_submit_snapshot(engine, &snapshot, request_id, sequence);
 }
 
 static void saki_protocol_handle_ping(
@@ -764,14 +842,30 @@ static void saki_protocol_handle_ping(
             ",\"internal_min_bytes\":%" PRIu32
             ",\"app_stack_min_bytes\":%" PRIu32
             ",\"ui_stack_min_bytes\":%" PRIu32
-            ",\"usb_stack_min_bytes\":%" PRIu32 "}",
+            ",\"usb_stack_min_bytes\":%" PRIu32
+            ",\"ble_stack_min_bytes\":%" PRIu32
+            ",\"ble_rx_drops\":%" PRIu32
+            ",\"ble_tx_drops\":%" PRIu32
+            ",\"ble_security_rejections\":%" PRIu32
+            ",\"ble_pairing_rejections\":%" PRIu32
+            ",\"ble_disconnects\":%" PRIu32
+            ",\"transport_switches\":%" PRIu32
+            ",\"transport_rejections\":%" PRIu32 "}",
             runtime.heap_free_bytes,
             runtime.heap_min_bytes,
             runtime.internal_free_bytes,
             runtime.internal_min_bytes,
             runtime.app_stack_min_bytes,
             runtime.ui_stack_min_bytes,
-            runtime.usb_stack_min_bytes
+            runtime.usb_stack_min_bytes,
+            runtime.ble_stack_min_bytes,
+            runtime.ble_rx_drops,
+            runtime.ble_tx_drops,
+            runtime.ble_security_rejections,
+            runtime.ble_pairing_rejections,
+            runtime.ble_disconnects,
+            runtime.transport_switches,
+            runtime.transport_rejections
         );
         if (appended < 0 || (size_t)appended >= sizeof(response) - (size_t)length) {
             saki_protocol_increment(&engine->diagnostics.tx_drops);
@@ -927,6 +1021,38 @@ void saki_protocol_engine_init(
     engine->next_id = 1;
     engine->transmit = transmit;
     engine->apply_state = apply_state;
+    engine->transport = SAKI_TRANSPORT_USB;
+    engine->callback_context = callback_context;
+    snprintf(engine->device_id, sizeof(engine->device_id), "%s", device_id);
+    snprintf(
+        engine->firmware_version,
+        sizeof(engine->firmware_version),
+        "%s",
+        firmware_version
+    );
+}
+
+void saki_protocol_engine_init_peer(
+    saki_protocol_engine_t *engine,
+    const char *device_id,
+    const char *firmware_version,
+    saki_transport_id_t transport,
+    uint32_t capability_flags,
+    saki_protocol_tx_fn transmit,
+    saki_protocol_candidate_fn submit_candidate,
+    void *callback_context
+)
+{
+    if (engine == NULL) {
+        return;
+    }
+    memset(engine, 0, sizeof(*engine));
+    saki_ndjson_framer_init(&engine->framer);
+    engine->next_id = 1;
+    engine->transport = transport;
+    engine->capability_flags = capability_flags;
+    engine->transmit = transmit;
+    engine->submit_candidate = submit_candidate;
     engine->callback_context = callback_context;
     snprintf(engine->device_id, sizeof(engine->device_id), "%s", device_id);
     snprintf(
@@ -967,7 +1093,7 @@ void saki_protocol_engine_receive(
 )
 {
     if (engine == NULL || data == NULL || engine->transmit == NULL ||
-        engine->apply_state == NULL) {
+        (engine->apply_state == NULL && engine->submit_candidate == NULL)) {
         return;
     }
     saki_ndjson_framer_feed(

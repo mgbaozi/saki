@@ -3,7 +3,16 @@
 正式版本的需求、设计、任务和用户指南按语义化版本归档。发布说明单独放在
 `releases/`；尚未进入某个版本的工作只记录在 `ROADMAP.md`。
 
-## 当前版本
+## 当前开发版本
+
+0.3.0-dev 的 BLE 实现与离线验证正在进行；尚未完成真机配对、切换和稳定性验收：
+
+- [0.3.0 产品与通信规格](./versions/0.3.0/SPEC.md)
+- [0.3.0 工程实施设计](./versions/0.3.0/IMPLEMENTATION.md)
+- [0.3.0 实施任务清单与验证状态](./versions/0.3.0/TASKS.md)
+- [0.3.0 BLE 用户流程](./versions/0.3.0/USER_GUIDE.md)
+
+## 已发布版本
 
 - [0.2.0 产品与通信规格](./versions/0.2.0/SPEC.md)
 - [0.2.0 工程实施设计](./versions/0.2.0/IMPLEMENTATION.md)

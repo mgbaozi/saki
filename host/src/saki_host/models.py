@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+MAX_JSON_SAFE_INTEGER = 9_007_199_254_740_991
+
 
 class AgentState(StrEnum):
     IDLE = "idle"
@@ -116,6 +118,8 @@ class StateSnapshot:
             raise ValueError(f"{self.state.value} requires task information")
         if self.elapsed_ms is not None and self.elapsed_ms < 0:
             raise ValueError("elapsed_ms cannot be negative")
+        if self.elapsed_ms is not None and self.elapsed_ms > MAX_JSON_SAFE_INTEGER:
+            raise ValueError("elapsed_ms exceeds the JSON safe integer maximum")
 
     def to_payload(self) -> dict[str, Any]:
         result: dict[str, Any] = {

@@ -1,27 +1,10 @@
 # Saki 路线图
 
-本文件只记录 `0.2.0` 之后、尚未排入正式版本的工作。当前首版完成情况见
-[0.2.0 任务清单](./versions/0.2.0/TASKS.md)。目标版本仅为规划建议，在开始开发时确认。
-
-## BLE fallback（建议目标：0.3.0）
-
-### B0.1 实现 NimBLE transport
-
-- 使用 0.2.0 SPEC 预留的 Service/RX/TX UUID。
-- 支持 Write With Response、Notify 和 MTU 分片。
-- 复用同一 NDJSON parser，不分叉应用协议。
-
-### B0.2 配对和绑定
-
-- 使用 LE Secure Connections。
-- Mac 端使用 `bleak` 可选依赖。
-- 明确清除绑定、换 Mac 和恢复流程。
-
-### B0.3 BLE 恢复和压力测试
-
-- 覆盖 Mac 休眠/唤醒、距离断开、MTU 变化和连续消息。
-- 断线后清除不完整分片。
-- 测量从 USB 失效到 BLE 快照可见的切换时间。
+本文件记录尚未排入版本的工作。当前首版完成情况见
+[0.2.0 任务清单](./versions/0.2.0/TASKS.md)。安全 BLE fallback 已正式迁入
+[0.3.0 规格](./versions/0.3.0/SPEC.md)、[工程设计](./versions/0.3.0/IMPLEMENTATION.md)和
+[任务清单](./versions/0.3.0/TASKS.md)，不再在路线图中重复维护。0.3.0-dev 已进入实现阶段，
+是否达到发布条件以任务清单中的自动与真机验证状态为准。
 
 ## Wi-Fi fallback（建议目标：0.4.0）
 
@@ -42,11 +25,14 @@
 - 明确可信局域网与非可信网络的威胁模型。
 - 决定非可信网络是否强制 TLS，以及证书或密钥轮换方式。
 
-## 多传输仲裁（BLE/Wi-Fi 完成后）
+## 三传输仲裁（Wi-Fi 完成后）
+
+0.3.0 先实现 `USB > BLE` 的双传输仲裁。加入 Wi-Fi 后，再把同一接口扩展为完整的
+`USB > BLE > Wi-Fi` 三传输矩阵。
 
 ### I1.1 实现优先级
 
-- 默认优先级为 USB > BLE > Wi-Fi。
+- 默认优先级为 USB > BLE > Wi-Fi；前两级行为沿用 0.3.0 计划交付并验证的契约。
 - 只有完成 hello 和完整 status 的候选 transport 才能接管 UI。
 
 ### I1.2 实现原子切换
@@ -57,7 +43,7 @@
 
 ### I1.3 切换矩阵测试
 
-- 覆盖 USB↔BLE、USB↔Wi-Fi、BLE↔Wi-Fi。
+- 0.3.0 计划覆盖 USB↔BLE；本阶段新增 USB↔Wi-Fi、BLE↔Wi-Fi，并回归 USB↔BLE。
 - 每个方向覆盖活动、等待和终态。
 - 切换时不出现空白、旧状态回退或重复 ACK 混淆。
 

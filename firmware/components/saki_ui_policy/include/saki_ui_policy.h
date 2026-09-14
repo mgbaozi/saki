@@ -52,6 +52,11 @@ uint32_t saki_ui_policy_on_tap(
     uint64_t now_ms
 );
 
+uint32_t saki_ui_policy_on_local_activity(
+    saki_ui_policy_t *policy,
+    uint64_t now_ms
+);
+
 uint32_t saki_ui_policy_tick(
     saki_ui_policy_t *policy,
     const saki_state_snapshot_t *snapshot,

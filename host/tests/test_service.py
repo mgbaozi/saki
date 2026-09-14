@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from saki_host import service as service_module
+from saki_host.ble_binding import BleBinding, BleBindingStore
 from saki_host.models import AgentState, StateSnapshot, TaskInfo
 from saki_host.protocol import ProtocolCodec
+from saki_host.protocol_session import ProtocolSessionError
 from saki_host.service import (
+    ActiveLink,
     ReconnectPolicy,
     SakiHostService,
     ServiceConfig,
@@ -18,6 +23,8 @@ from saki_host.service import (
     parse_device_diagnostics,
     parse_device_runtime,
 )
+from saki_host.transports.base import TransportKind
+from saki_host.transports.ble import BleCandidate
 
 
 class ReconnectPolicyTests(unittest.TestCase):
@@ -235,6 +242,20 @@ class DeviceDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(parse_device_runtime({"runtime": runtime}), runtime)
 
+    def test_runtime_parser_accepts_optional_ble_stack_metric(self) -> None:
+        runtime = {
+            "heap_free_bytes": 8_000_000,
+            "heap_min_bytes": 7_900_000,
+            "internal_free_bytes": 180_000,
+            "internal_min_bytes": 160_000,
+            "app_stack_min_bytes": 1_400,
+            "ui_stack_min_bytes": 3_200,
+            "usb_stack_min_bytes": 2_800,
+            "ble_stack_min_bytes": 2_400,
+        }
+
+        self.assertEqual(parse_device_runtime({"runtime": runtime}), runtime)
+
     def test_runtime_parser_ignores_missing_or_malformed_metrics(self) -> None:
         self.assertIsNone(parse_device_runtime({}))
         self.assertIsNone(
@@ -252,6 +273,194 @@ class DeviceDiagnosticsTests(unittest.TestCase):
                 }
             )
         )
+
+
+class TransportSupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ble_reconnect_uses_only_cached_and_verified_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binding_path = Path(directory) / "binding.json"
+            BleBindingStore(binding_path).save(BleBinding("verified", "0123456789ab"))
+            service = SakiHostService(ServiceConfig(ble_binding_path=binding_path))
+            visible = [
+                BleCandidate("other", "Saki", -20, object()),
+                BleCandidate("verified", "Saki", -40, object()),
+            ]
+
+            class Transport:
+                def __init__(self, device: object, **_kwargs: object) -> None:
+                    self.device = device
+
+            class Session:
+                latest: Session | None = None
+
+                def __init__(self, transport: Transport, codec: ProtocolCodec, **_kwargs: object):
+                    self.transport = transport
+                    self.codec = codec
+                    self.closed = False
+                    self.required_capabilities: frozenset[str] | None = None
+                    Session.latest = self
+
+                async def connect(self) -> None:
+                    pass
+
+                async def handshake(self, **kwargs: object) -> dict[str, object]:
+                    self.required_capabilities = kwargs["required_capabilities"]  # type: ignore[assignment]
+                    return {"device": {"id": "0123456789ab"}}
+
+                async def close(self) -> None:
+                    self.closed = True
+
+            async def discover(**_kwargs: object) -> list[BleCandidate]:
+                return visible
+
+            with (
+                patch.object(service_module, "discover_saki_devices", side_effect=discover),
+                patch.object(service_module, "BleByteTransport", Transport),
+                patch.object(service_module, "ProtocolSession", Session),
+            ):
+                link = await service._connect_ble_link()
+
+        session = Session.latest
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertIs(session.transport.device, visible[1].device)
+        self.assertIs(session.codec, service._codec)
+        self.assertEqual(
+            session.required_capabilities,
+            frozenset({"ble", "secure-connection", "transport-arbitration"}),
+        )
+        self.assertEqual(link.device_id, "0123456789ab")
+
+    async def test_ble_reconnect_rejects_changed_device_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binding_path = Path(directory) / "binding.json"
+            BleBindingStore(binding_path).save(BleBinding("verified", "0123456789ab"))
+            service = SakiHostService(ServiceConfig(ble_binding_path=binding_path))
+            candidate = BleCandidate("verified", "Saki", -40, object())
+
+            class Transport:
+                def __init__(self, _device: object, **_kwargs: object) -> None:
+                    pass
+
+            class Session:
+                closed = False
+
+                def __init__(self, *_args: object, **_kwargs: object) -> None:
+                    Session.closed = False
+
+                async def connect(self) -> None:
+                    pass
+
+                async def handshake(self, **_kwargs: object) -> dict[str, object]:
+                    return {"device": {"id": "fedcba987654"}}
+
+                async def close(self) -> None:
+                    Session.closed = True
+
+            async def discover(**_kwargs: object) -> list[BleCandidate]:
+                return [candidate]
+
+            with (
+                patch.object(service_module, "discover_saki_devices", side_effect=discover),
+                patch.object(service_module, "BleByteTransport", Transport),
+                patch.object(service_module, "ProtocolSession", Session),
+                self.assertRaisesRegex(ProtocolSessionError, "does not match"),
+            ):
+                await service._connect_ble_link()
+
+        self.assertTrue(Session.closed)
+
+    async def test_usb_takeover_syncs_before_ble_is_returned_for_close(self) -> None:
+        service = SakiHostService(ServiceConfig(transport="auto", heartbeat_seconds=60))
+        events: list[str] = []
+
+        class Session:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.closed = False
+
+            async def apply_status(self, _snapshot: StateSnapshot) -> dict[str, object]:
+                events.append(f"{self.name}:status")
+                return {"ok": True, "applied": True, "last_seq": 1}
+
+            async def ping(self) -> dict[str, object]:
+                return {}
+
+            async def close(self) -> None:
+                self.closed = True
+                events.append(f"{self.name}:close")
+
+        ble_session = Session("ble")
+        usb_session = Session("usb")
+        ble_link = ActiveLink(
+            ble_session,  # type: ignore[arg-type]
+            TransportKind.BLE,
+            "ble-identifier",
+            "0123456789ab",
+        )
+        usb_link = ActiveLink(
+            usb_session,  # type: ignore[arg-type]
+            TransportKind.USB,
+            "/dev/cu.saki",
+            "0123456789ab",
+            "/dev/cu.saki",
+        )
+
+        async def usb_available() -> str:
+            return "/dev/cu.saki"
+
+        async def connect_usb(_port: str | None = None) -> ActiveLink:
+            self.assertFalse(ble_session.closed)
+            return usb_link
+
+        with (
+            patch.object(service, "_wait_for_usb_availability", side_effect=usb_available),
+            patch.object(service, "_connect_usb_link", side_effect=connect_usb),
+        ):
+            replacement, generation = await asyncio.wait_for(
+                service._run_active_link(ble_link, service.mailbox.generation),
+                0.2,
+            )
+
+        self.assertIs(replacement, usb_link)
+        self.assertEqual(generation, service.mailbox.generation)
+        self.assertFalse(ble_session.closed)
+        self.assertEqual(events, ["usb:status"])
+
+        await service._close_link(ble_link)
+        self.assertEqual(events, ["usb:status", "ble:close"])
+
+    async def test_successive_transports_share_one_codec_and_global_sequence(self) -> None:
+        service = SakiHostService(ServiceConfig())
+        messages: list[dict[str, object]] = []
+
+        class CodecSession:
+            async def apply_status(self, snapshot: StateSnapshot) -> dict[str, object]:
+                message = service._codec.status(snapshot)
+                messages.append(message)
+                return {"ok": True, "applied": True, "last_seq": message["seq"]}
+
+            async def close(self) -> None:
+                pass
+
+        first = ActiveLink(
+            CodecSession(),  # type: ignore[arg-type]
+            TransportKind.BLE,
+            "ble",
+            "0123456789ab",
+        )
+        second = ActiveLink(
+            CodecSession(),  # type: ignore[arg-type]
+            TransportKind.USB,
+            "usb",
+            "0123456789ab",
+        )
+
+        await service._sync_link(first)
+        await service._sync_link(second)
+
+        self.assertEqual([message["seq"] for message in messages], [1, 2])
+        self.assertEqual(len({message["session"] for message in messages}), 1)
 
 
 if __name__ == "__main__":

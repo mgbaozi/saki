@@ -17,7 +17,7 @@ scripts/build-firmware-profile.zsh release
 
 The profiles generate independent `firmware/build-dev/sdkconfig` and
 `firmware/build-release/sdkconfig` files. The developer image reports
-`0.2.0-dev`; the first formal release profile reports `0.2.0`. Do not run
+`0.3.0-dev`; the formal 0.3 release profile reports `0.3.0`. Do not run
 `idf.py set-target`: the reviewed ESP32-S3 board configuration is loaded from
 `config/sdkconfig.vendor`.
 
