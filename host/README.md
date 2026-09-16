@@ -12,7 +12,7 @@ scripts/check.zsh
 host/.venv/bin/saki-host demo
 ```
 
-The development package version is `0.4.0.dev0`. USB remains available without
+The package version is `0.4.5`. USB remains available without
 Bluetooth dependencies. For BLE development on macOS, install the optional
 extra and complete first pairing in the foreground:
 

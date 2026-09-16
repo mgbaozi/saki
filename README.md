@@ -4,7 +4,7 @@ Saki 是一块放在桌面上的 AI Agent 状态屏。它由 ESP32-S3 设备和 
 把 Codex 等 Agent 的工作状态同步到独立屏幕，让你不切换窗口也能看到任务正在思考、执行、
 等待操作，还是已经完成。
 
-当前开发版本为 **0.4.0-dev**：支持 Codex / Claude Code 多 Session，Host 最多跟踪 32 项、
+当前版本为 **0.4.5**（日常固件报告 **0.4.5-dev**）：支持 Codex / Claude Code 多 Session，Host 最多跟踪 32 项、
 设备以最新提交主屏及其他 Session 侧栏最多显示 4 项。核心代码、离线检查和固件构建已通过；0.4 的真机混合并发、触摸、
 USB/BLE 切换与资源验收尚未完成。范围见 [0.4 规格](./docs/versions/0.4.0/SPEC.md)，
 安装见 [0.4 用户指南](./docs/versions/0.4.0/USER_GUIDE.md)。目标硬件为正点原子
@@ -144,7 +144,7 @@ scripts/build-firmware-tests.zsh
 - [0.3.0 用户安装与排障指南](./docs/versions/0.3.0/USER_GUIDE.md)
 - [0.4.0 Codex / Claude Code 多 Session 规格](./docs/versions/0.4.0/SPEC.md)
 - [0.4.5 Claude Code hook 支持规划](./docs/versions/0.4.5/SPEC.md)
-- [发布说明](./docs/releases/0.2.0.md)
+- [0.4.5 发布说明](./docs/releases/0.4.5.md)
 - [0.2.0 已发布文档](./docs/versions/0.2.0/SPEC.md)
 - [后续路线图](./docs/ROADMAP.md)
 
