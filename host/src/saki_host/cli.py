@@ -6,6 +6,7 @@ import json
 import math
 import platform
 import resource
+import signal
 import statistics
 import sys
 import time
@@ -14,15 +15,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
+from .adapters import SourceKind, normalize_hook
 from .ble_binding import (
     DEFAULT_BLE_BINDING_PATH,
     BleBinding,
     BleBindingError,
     BleBindingStore,
 )
-from .codex_hooks import snapshot_from_codex_hook
 from .fuzz import build_fuzz_cases
-from .ipc import DEFAULT_SOCKET_PATH, HookDeliveryError, deliver_snapshot
+from .hooks_config import configure_hooks
+from .identity import DEFAULT_IDENTITY_PATH, DEFAULT_STATE_DIR, load_identity_key
+from .ipc import DEFAULT_SOCKET_PATH, HookDeliveryError, deliver_source_event, forget_session
 from .models import (
     Activity,
     ActivityKind,
@@ -49,6 +52,7 @@ from .service import (
     parse_device_diagnostics,
     parse_device_runtime,
 )
+from .sessions import SessionRegistry, load_checkpoint
 from .transports.ble import (
     DEFAULT_BLE_SCAN_SECONDS,
     BleByteTransport,
@@ -251,27 +255,39 @@ def _run_hook(
     socket_path: Path,
     write_stdout: bool,
     strict: bool,
+    source: SourceKind = SourceKind.CODEX,
+    identity_key: Path = DEFAULT_IDENTITY_PATH,
 ) -> int:
+    def expired(_signum, _frame):
+        raise TimeoutError("hook deadline")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
     try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError as exc:
-        print(f"invalid hook JSON: {exc}", file=sys.stderr)
-        return 2
-    if not isinstance(payload, dict):
-        print("hook payload must be a JSON object", file=sys.stderr)
-        return 2
-    snapshot = snapshot_from_codex_hook(event_name, payload)
-    if write_stdout:
-        codec = ProtocolCodec()
-        _write(codec.status(snapshot))
+        emitted_ns = time.monotonic_ns()
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        raw = stream.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("input too large")
+        payload = json.loads(raw)
+        event = normalize_hook(
+            source, event_name, payload, load_identity_key(identity_key), emitted_ns=emitted_ns
+        )
+        if event is not None:
+            if write_stdout:
+                # Explicit diagnostic output still contains only safe normalized fields.
+                print(json.dumps(event.to_dict(), separators=(",", ":")))
+            else:
+                deliver_source_event(event, socket_path)
         return 0
-    try:
-        deliver_snapshot(snapshot, socket_path)
-    except HookDeliveryError as exc:
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
         if strict:
-            print(str(exc), file=sys.stderr)
+            print("hook unavailable or invalid input; run hooks check", file=sys.stderr)
             return 1
-    return 0
+        return 0
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _run_service(
@@ -281,8 +297,10 @@ def _run_service(
     stale_after: float,
     transport: ServiceTransportMode = ServiceTransportMode.AUTO,
     ble_binding_path: Path = DEFAULT_BLE_BINDING_PATH,
+    state_dir: Path = DEFAULT_STATE_DIR,
 ) -> int:
     config = ServiceConfig(
+        state_dir=state_dir,
         port=port,
         transport=transport,
         ble_binding_path=ble_binding_path,
@@ -333,10 +351,7 @@ async def _ble_list(timeout: float) -> int:
         print("No Saki BLE devices found.")
         return 0
     for candidate in candidates:
-        print(
-            f"saki   {candidate.identifier} rssi={candidate.rssi} "
-            f"name={candidate.name}"
-        )
+        print(f"saki   {candidate.identifier} rssi={candidate.rssi} name={candidate.name}")
     return 0
 
 
@@ -367,9 +382,7 @@ def _select_ble_candidate(
 
 
 async def _ble_pair(identifier: str | None, timeout: float, binding_path: Path) -> int:
-    candidates = await discover_saki_devices(
-        timeout=min(timeout, DEFAULT_BLE_SCAN_SECONDS)
-    )
+    candidates = await discover_saki_devices(timeout=min(timeout, DEFAULT_BLE_SCAN_SECONDS))
     candidate = _select_ble_candidate(candidates, identifier)
     transport = BleByteTransport(
         candidate.device,
@@ -381,9 +394,7 @@ async def _ble_pair(identifier: str | None, timeout: float, binding_path: Path) 
         await session.connect()
         hello = await session.handshake(
             timeout=timeout,
-            required_capabilities=frozenset(
-                {"ble", "secure-connection", "transport-arbitration"}
-            ),
+            required_capabilities=frozenset({"ble", "secure-connection", "transport-arbitration"}),
         )
         ack = await session.apply_status(StateSnapshot(state=AgentState.IDLE))
         device = hello["device"]
@@ -526,9 +537,7 @@ async def _ble_fuzz(
         recovered_ack = await link.session.apply_status(StateSnapshot(state=AgentState.IDLE))
         recovered_pong = await link.session.ping()
 
-        invalid_delta = (
-            _ble_diagnostic_counter(recovered_pong, "invalid_frames") - invalid_before
-        )
+        invalid_delta = _ble_diagnostic_counter(recovered_pong, "invalid_frames") - invalid_before
         oversized_delta = (
             _ble_diagnostic_counter(recovered_pong, "oversized_frames") - oversized_before
         )
@@ -623,9 +632,7 @@ async def _ble_soak(
 
         for index in range(1, count + 1):
             target = (
-                run_started + duration * ((index - 1) / (count - 1))
-                if count > 1
-                else run_started
+                run_started + duration * ((index - 1) / (count - 1)) if count > 1 else run_started
             )
             delay = target - time.monotonic()
             if delay > 0:
@@ -698,19 +705,22 @@ async def _ble_soak(
         and all(key in runtime_start and key in runtime_end for key in observed_keys)
     ):
         runtime_delta = {
-            key: max(0, int(runtime_end[key]) - int(runtime_start[key]))
-            for key in observed_keys
+            key: max(0, int(runtime_end[key]) - int(runtime_start[key])) for key in observed_keys
         }
 
-    runtime_safe = isinstance(runtime_end, dict) and "ble_stack_min_bytes" in runtime_end and (
-        int(runtime_end["internal_min_bytes"]) >= MIN_INTERNAL_HEAP_BYTES
-        and all(
-            int(runtime_end[key]) >= MIN_TASK_STACK_BYTES
-            for key in (
-                "app_stack_min_bytes",
-                "ui_stack_min_bytes",
-                "usb_stack_min_bytes",
-                "ble_stack_min_bytes",
+    runtime_safe = (
+        isinstance(runtime_end, dict)
+        and "ble_stack_min_bytes" in runtime_end
+        and (
+            int(runtime_end["internal_min_bytes"]) >= MIN_INTERNAL_HEAP_BYTES
+            and all(
+                int(runtime_end[key]) >= MIN_TASK_STACK_BYTES
+                for key in (
+                    "app_stack_min_bytes",
+                    "ui_stack_min_bytes",
+                    "usb_stack_min_bytes",
+                    "ble_stack_min_bytes",
+                )
             )
         )
     )
@@ -827,7 +837,9 @@ def _run_usb_doctor(port: str | None) -> int:
             print("Hint: this may be the ROM download/debug port; press RST without holding K0.")
             return 1
         if candidate is None:
-            print(f"WARN serial: {port} is not in the current serial device list; probing it anyway")
+            print(
+                f"WARN serial: {port} is not in the current serial device list; probing it anyway"
+            )
 
     try:
         selected_port = select_saki_port(port)
@@ -935,10 +947,7 @@ async def _ble_doctor(binding_path: Path) -> int:
     finally:
         await service._close_link(link)
 
-    print(
-        f"PASS BLE handshake: device=…{link.device_id[-4:]} "
-        f"handshake_ms={handshake_ms:.1f}"
-    )
+    print(f"PASS BLE handshake: device=…{link.device_id[-4:]} handshake_ms={handshake_ms:.1f}")
     print(
         f"PASS BLE GATT: att_mtu={att_mtu if att_mtu is not None else 'unknown'} "
         f"write_payload_bytes={write_payload_bytes}"
@@ -1273,7 +1282,10 @@ def _run_serial_fuzz(port: str | None, count: int, seed: int, delay: float) -> i
             f"drained_response_bytes={drained_bytes}"
         )
         if invalid_delta <= 0 or oversized_delta <= 0:
-            print("fuzz failed: device diagnostics did not observe the invalid corpus", file=sys.stderr)
+            print(
+                "fuzz failed: device diagnostics did not observe the invalid corpus",
+                file=sys.stderr,
+            )
             return 1
         if recovered_ack.get("applied") is not True:
             print("fuzz failed: valid recovery status was not applied", file=sys.stderr)
@@ -1579,9 +1591,7 @@ def build_parser() -> argparse.ArgumentParser:
     serial_cycle.add_argument(
         "--count", type=int, default=20, help="number of open/handshake/close cycles"
     )
-    serial_cycle.add_argument(
-        "--interval", type=float, default=0.1, help="seconds between cycles"
-    )
+    serial_cycle.add_argument("--interval", type=float, default=0.1, help="seconds between cycles")
     serial_fuzz = serial_subparsers.add_parser(
         "fuzz", help="inject a bounded invalid corpus and verify protocol recovery"
     )
@@ -1597,9 +1607,7 @@ def build_parser() -> argparse.ArgumentParser:
         "soak", help="run a bounded long-duration status and resource test"
     )
     serial_soak.add_argument("--port", help="serial callout device; auto-detect by default")
-    serial_soak.add_argument(
-        "--count", type=int, default=10_000, help="number of status updates"
-    )
+    serial_soak.add_argument("--count", type=int, default=10_000, help="number of status updates")
     serial_soak.add_argument(
         "--duration", type=float, default=86_400, help="scheduled test duration in seconds"
     )
@@ -1610,7 +1618,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds between device diagnostic/runtime samples",
     )
     serial_soak.add_argument(
-        "--report", type=Path, required=True, help="new JSON report path; existing files are refused"
+        "--report",
+        type=Path,
+        required=True,
+        help="new JSON report path; existing files are refused",
     )
     ble = subparsers.add_parser("ble", help="manage and diagnose Saki over Bluetooth LE")
     ble_subparsers = ble.add_subparsers(dest="ble_command", required=True)
@@ -1705,16 +1716,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="verified BLE binding cache path",
     )
     ble_soak.add_argument(
-        "--report", type=Path, required=True, help="new JSON report path; existing files are refused"
+        "--report",
+        type=Path,
+        required=True,
+        help="new JSON report path; existing files are refused",
     )
-    hook = subparsers.add_parser("hook", help="map one Codex hook JSON object to a status")
-    hook.add_argument("event", help="Codex hook event name")
+    hook = subparsers.add_parser("hook", help="normalize a coding-agent lifecycle hook")
+    hook.add_argument("event", help="source hook event name")
+    hook.add_argument("--source", choices=[s.value for s in SourceKind], default="codex")
+    hook.add_argument("--identity-key", type=Path, default=DEFAULT_IDENTITY_PATH)
     hook.add_argument(
         "--socket", type=Path, default=DEFAULT_SOCKET_PATH, help="Host service Unix socket"
     )
-    hook.add_argument("--stdout", action="store_true", help="print protocol NDJSON for debugging")
+    hook.add_argument(
+        "--stdout", action="store_true", help="print a safe normalized event for debugging"
+    )
     hook.add_argument("--strict", action="store_true", help="fail if the Host service is offline")
-    serve = subparsers.add_parser("serve", help="run the hook receiver and persistent device session")
+    hooks = subparsers.add_parser("hooks", help="manage safe coding-agent observer hooks")
+    hooks.add_argument("action", choices=["install", "uninstall", "check"])
+    hooks.add_argument("--source", choices=[s.value for s in SourceKind], required=True)
+    hooks.add_argument("--settings", type=Path, help="explicit project/user settings path")
+    hooks.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    sessions = subparsers.add_parser(
+        "sessions", help="inspect saved sessions or forget display entries"
+    )
+    sessions.add_argument("action", choices=["list", "forget"])
+    sessions.add_argument("session_id", nargs="?", help="pseudonymous ID or all for forget")
+    sessions.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    sessions.add_argument("--socket", type=Path, default=DEFAULT_SOCKET_PATH)
+    serve = subparsers.add_parser(
+        "serve", help="run the hook receiver and persistent device session"
+    )
+    serve.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     serve.add_argument("--port", help="serial callout device; auto-detect by default")
     serve.add_argument(
         "--transport",
@@ -1814,7 +1847,67 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return _run_serial_replay(args.port, args.path, args.interval, args.hold)
     if args.command == "hook":
-        return _run_hook(args.event, args.socket, args.stdout, args.strict)
+        return _run_hook(
+            args.event,
+            args.socket,
+            args.stdout,
+            args.strict,
+            SourceKind(args.source),
+            args.identity_key,
+        )
+    if args.command == "hooks":
+        source = SourceKind(args.source)
+        settings = args.settings or (
+            Path.home()
+            / (".claude/settings.json" if source is SourceKind.CLAUDE_CODE else ".codex/hooks.json")
+        )
+        try:
+            result = configure_hooks(settings, source, args.action, state_dir=args.state_dir)
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            print(
+                "hook configuration unavailable or invalid; no settings content logged",
+                file=sys.stderr,
+            )
+            return 1
+        print(json.dumps(result))
+        return int(
+            args.action == "check"
+            and not all(result.get(key) for key in ("installed", "wrapper_ready", "identity_ready"))
+        )
+    if args.command == "sessions":
+        try:
+            if args.action == "forget":
+                forget_session(args.session_id, args.socket)
+                print(json.dumps({"requested": True}))
+            else:
+                registry = SessionRegistry()
+                try:
+                    registry.restore(load_checkpoint(args.state_dir / "sessions.json"))
+                except FileNotFoundError:
+                    pass
+                print(
+                    json.dumps(
+                        {
+                            "saved_checkpoint": True,
+                            "sessions": [
+                                {
+                                    "id": sid,
+                                    "source": record.event.source.value,
+                                    "state": record.snapshot.state.value,
+                                    "elapsed_ms": record.snapshot.elapsed_ms,
+                                }
+                                for sid, record in registry.records.items()
+                            ],
+                        }
+                    )
+                )
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            print(
+                "session operation unavailable; use a safe ID and check Host service",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
     if args.command == "serve":
         if args.heartbeat <= 0:
             print("--heartbeat must be greater than zero", file=sys.stderr)
@@ -1829,6 +1922,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.stale_after,
             ServiceTransportMode(args.transport),
             args.ble_binding,
+            args.state_dir,
         )
     if args.command == "serial" and args.serial_command == "list":
         return _run_serial_list()
@@ -1913,12 +2007,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.binding,
         )
     if args.command == "ble" and args.ble_command == "soak":
-        if (
-            args.count <= 0
-            or args.duration < 0
-            or args.sample_interval <= 0
-            or args.timeout <= 0
-        ):
+        if args.count <= 0 or args.duration < 0 or args.sample_interval <= 0 or args.timeout <= 0:
             print(
                 "--count, --sample-interval and --timeout must be positive; "
                 "--duration cannot be negative",

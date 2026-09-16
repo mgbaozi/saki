@@ -30,6 +30,10 @@ typedef struct {
     char latest_frame[32];
 } framer_context_t;
 
+/* Unity runs these cases serially; reuse large parser buffers between cases. */
+static saki_protocol_engine_t engine;
+static protocol_context_t capture;
+
 static esp_err_t capture_transmit(
     const uint8_t *data,
     size_t length,
@@ -184,8 +188,6 @@ static void feed_hello(saki_protocol_engine_t *engine, uint32_t id)
 
 static void assert_fresh_engine_error(const char *message, const char *error_code)
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     char expected[64];
 
     initialize_engine(&engine, &capture);
@@ -265,8 +267,6 @@ TEST_CASE("NDJSON framer recovers after oversized input", "[saki][protocol]")
 
 TEST_CASE("disconnect clears a partial frame before reconnect", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     static const char partial[] =
         "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION;
     static const char status[] =
@@ -291,8 +291,6 @@ TEST_CASE("disconnect clears a partial frame before reconnect", "[saki][protocol
 
 TEST_CASE("protocol applies complete status and rejects old sequence", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     saki_protocol_diagnostics_t diagnostics;
     static const char status[] =
         "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
@@ -332,8 +330,6 @@ TEST_CASE("protocol applies complete status and rejects old sequence", "[saki][p
 
 TEST_CASE("protocol enforces the elapsed JSON safe integer range", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     static const char maximum[] =
         "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
         "\",\"seq\":1,\"state\":\"working\","
@@ -360,8 +356,6 @@ TEST_CASE("protocol enforces the elapsed JSON safe integer range", "[saki][proto
 
 TEST_CASE("BLE peer routes capabilities transport and sequence", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     static const char status[] =
         "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
         "\",\"seq\":7,\"state\":\"working\","
@@ -386,8 +380,6 @@ TEST_CASE("BLE peer routes capabilities transport and sequence", "[saki][protoco
 
 TEST_CASE("peer returns global stale sequence without applying", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     static const char status[] =
         "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
         "\",\"seq\":6,\"state\":\"working\","
@@ -438,8 +430,6 @@ TEST_CASE("elapsed clock advances and freezes by state", "[saki][model]")
 
 TEST_CASE("pong includes optional runtime safety metrics", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     static const saki_runtime_metrics_t runtime = {
         .heap_free_bytes = 8000000,
         .heap_min_bytes = 7900000,
@@ -489,8 +479,6 @@ TEST_CASE("pong includes optional runtime safety metrics", "[saki][protocol]")
 
 TEST_CASE("UTF-8 validation and truncation preserve code point boundaries", "[saki][model]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     static const char mixed[] = "中文abc";
     static const uint8_t emoji[] = {0xF0, 0x9F, 0x98, 0x80};
     static const uint8_t truncated_three_byte[] = {0xE4, 0xB8};
@@ -539,8 +527,6 @@ TEST_CASE("UTF-8 validation and truncation preserve code point boundaries", "[sa
 
 TEST_CASE("protocol accepts uint32 sequence wrap", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     static const char wrapped[] =
         "{\"v\":1,\"type\":\"clear\",\"id\":2,\"session\":\"" TEST_SESSION
         "\",\"seq\":0}\n";
@@ -558,8 +544,6 @@ TEST_CASE("protocol accepts uint32 sequence wrap", "[saki][protocol]")
 
 TEST_CASE("five invalid frames clear the active session", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     saki_protocol_diagnostics_t diagnostics;
 
     initialize_engine(&engine, &capture);
@@ -577,8 +561,6 @@ TEST_CASE("five invalid frames clear the active session", "[saki][protocol]")
 
 TEST_CASE("protocol returns stable errors for invalid requests", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     static uint8_t oversized[SAKI_PROTOCOL_MAX_FRAME + 2];
     static const char missing_state[] =
         "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
@@ -627,8 +609,6 @@ TEST_CASE("protocol returns stable errors for invalid requests", "[saki][protoco
 
 TEST_CASE("busy display is valid and transmit failures are counted", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     saki_protocol_diagnostics_t diagnostics;
     static const char status[] =
         "{\"v\":1,\"type\":\"status\",\"id\":2,\"session\":\"" TEST_SESSION
@@ -653,8 +633,6 @@ TEST_CASE("busy display is valid and transmit failures are counted", "[saki][pro
 
 TEST_CASE("heartbeat timeout resets session and counters saturate", "[saki][protocol]")
 {
-    static saki_protocol_engine_t engine;
-    static protocol_context_t capture;
     saki_protocol_diagnostics_t diagnostics;
     uint64_t last_activity;
 

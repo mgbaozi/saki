@@ -23,3 +23,27 @@ free of credentials, private paths and real conversation content. The paired
 `handoff-*-usb.ndjson` and `handoff-*-ble.ndjson` files model the two physical
 legs of one logical Host session; transport metadata is intentionally not added
 to the v1 wire messages.
+
+## 0.4 capability-gated complete display sets
+
+Devices advertise `multi-session`; hosts select it with a second hello containing
+`mode:"multi-session"` and require the same mode in the response. Only then may
+hosts send the new `sessions` family. The frame carries 0–4 complete items and
+`total`, `hidden_attention`, `capacity_rejected`; items add source, run_id,
+revision and fresh to the existing snapshot fields. Item 0 is the latest accepted
+user submission and the default main view; up to three remaining items form the
+attention-ranked sidebar. Parsers preserve this order. Empty arrays clear the set.
+There are no partial item updates or multi-frame transactions. The entire compact
+frame must fit 2048 bytes; the Host shortens optional UTF-8 display text to fit.
+
+Global session/seq and transport arbitration govern the complete set. ACK
+`applied:true` commits it; exact byte-for-byte retries can receive
+`applied:false,committed:true` only while that same sequence is still committed.
+Ordinary stale/conflicting messages do not get committed confirmation. A committed
+multi-session Host session rejects legacy writes even after a legacy re-hello.
+Fresh Host sessions can choose legacy mode; older firmware receives the same latest-submission focus.
+
+Schema cannot express all byte limits, duplicate task identities or cross-field
+counts: Host/firmware tests additionally enforce them. JSON depth is bounded at
+16 and embedded/escaped NUL or trailing non-whitespace is rejected. See the
+[0.4 specification](../docs/versions/0.4.0/SPEC.md) for compatibility and recovery.

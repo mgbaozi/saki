@@ -46,11 +46,13 @@
 #define SAKI_UI_DEMO_ENABLED false
 #endif
 
-static saki_protocol_engine_t s_usb_protocol;
-static saki_protocol_engine_t s_ble_protocol;
+static saki_protocol_engine_t *s_usb_protocol;
+static saki_protocol_engine_t *s_ble_protocol;
 static saki_transport_manager_t s_transport_manager;
 static SemaphoreHandle_t s_transport_mutex;
 static saki_state_snapshot_t s_last_live_snapshot;
+static saki_display_snapshot_t *s_last_display;
+static bool s_multi_display;
 static bool s_has_last_live_snapshot;
 static uint32_t s_app_main_stack_min_bytes;
 
@@ -106,8 +108,8 @@ static esp_err_t saki_submit_state(const saki_state_snapshot_t *snapshot)
     esp_err_t result = saki_ui_submit_tracked(snapshot, &overwrote_pending);
 
     if (result == ESP_OK && overwrote_pending) {
-        saki_protocol_engine_note_ui_overwrite(&s_usb_protocol);
-        saki_protocol_engine_note_ui_overwrite(&s_ble_protocol);
+        saki_protocol_engine_note_ui_overwrite(s_usb_protocol);
+        saki_protocol_engine_note_ui_overwrite(s_ble_protocol);
     }
     return result;
 }
@@ -119,6 +121,20 @@ static void saki_show_disconnected(void)
 
     xSemaphoreTake(s_transport_mutex, portMAX_DELAY);
     if (s_transport_manager.active != SAKI_TRANSPORT_NONE) {
+        xSemaphoreGive(s_transport_mutex);
+        return;
+    }
+    if (s_multi_display) {
+        for (uint8_t i = 0; i < s_last_display->count; ++i) {
+            saki_state_snapshot_t *item = &s_last_display->items[i];
+            item->elapsed_ms = saki_state_elapsed_at(item, now_ms);
+            item->received_at_ms = now_ms;
+            item->connected = false;
+            snprintf(item->transport, sizeof(item->transport), "%s", "OFFLINE");
+        }
+        s_last_display->connected = false;
+        snprintf(s_last_display->transport, sizeof(s_last_display->transport), "%s", "OFFLINE");
+        (void)saki_ui_submit_display(s_last_display);
         xSemaphoreGive(s_transport_mutex);
         return;
     }
@@ -145,11 +161,36 @@ static esp_err_t saki_apply_state(
     (void)context;
 
     result = saki_submit_state(snapshot);
+    if (result == ESP_OK) s_multi_display = false;
     if (result == ESP_OK && snapshot->connected) {
         saki_state_snapshot_copy(&s_last_live_snapshot, snapshot);
         s_has_last_live_snapshot = true;
     }
     return result;
+}
+
+static esp_err_t saki_apply_display(const saki_display_snapshot_t *display, void *context)
+{
+    (void)context;
+    esp_err_t result = saki_ui_submit_display(display);
+    if (result == ESP_OK) {
+        *s_last_display = *display;
+        s_multi_display = true;
+    }
+    return result;
+}
+
+static saki_transport_outcome_t saki_submit_display(
+    const saki_display_snapshot_t *display, saki_transport_id_t transport,
+    const char *session, uint32_t sequence, uint64_t now_ms, void *context
+)
+{
+    (void)context;
+    xSemaphoreTake(s_transport_mutex, portMAX_DELAY);
+    saki_transport_outcome_t outcome = saki_transport_manager_submit_display(
+        &s_transport_manager, transport, session, sequence, display, now_ms);
+    xSemaphoreGive(s_transport_mutex);
+    return outcome;
 }
 
 static saki_transport_outcome_t saki_submit_candidate(
@@ -376,11 +417,18 @@ void app_main(void)
         mac[4],
         mac[5]
     );
+    /* These task-owned buffers are not DMA/ISR memory. Keep internal RAM for
+     * BLE, FreeRTOS and transient JSON/UI allocations; PSRAM is a board requirement. */
+    s_usb_protocol = heap_caps_calloc(1, sizeof(*s_usb_protocol), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_ble_protocol = heap_caps_calloc(1, sizeof(*s_ble_protocol), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_last_display = heap_caps_calloc(1, sizeof(*s_last_display), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ESP_ERROR_CHECK(s_usb_protocol && s_ble_protocol && s_last_display ? ESP_OK : ESP_ERR_NO_MEM);
     s_transport_mutex = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(s_transport_mutex == NULL ? ESP_ERR_NO_MEM : ESP_OK);
     saki_transport_manager_init(&s_transport_manager, saki_apply_state, NULL);
+    s_transport_manager.apply_display = saki_apply_display;
     saki_protocol_engine_init_peer(
-        &s_usb_protocol,
+        s_usb_protocol,
         device_id,
         SAKI_FIRMWARE_VERSION,
         SAKI_TRANSPORT_USB,
@@ -392,12 +440,12 @@ void app_main(void)
         NULL
     );
     saki_protocol_engine_set_runtime_provider(
-        &s_usb_protocol,
+        s_usb_protocol,
         saki_collect_runtime_metrics,
         NULL
     );
     saki_protocol_engine_init_peer(
-        &s_ble_protocol,
+        s_ble_protocol,
         device_id,
         SAKI_FIRMWARE_VERSION,
         SAKI_TRANSPORT_BLE,
@@ -409,10 +457,12 @@ void app_main(void)
         NULL
     );
     saki_protocol_engine_set_runtime_provider(
-        &s_ble_protocol,
+        s_ble_protocol,
         saki_collect_runtime_metrics,
         NULL
     );
+    s_usb_protocol->submit_display = saki_submit_display;
+    s_ble_protocol->submit_display = saki_submit_display;
     saki_ui_set_button_callback(saki_button_changed, NULL);
     saki_state_snapshot_init(&initial_state);
     initial_state.connected = false;
@@ -422,14 +472,14 @@ void app_main(void)
         saki_receive_usb,
         saki_usb_connection_changed,
         saki_usb_poll,
-        &s_usb_protocol
+        s_usb_protocol
     ));
     ret = saki_ble_start(
         saki_receive_ble,
         saki_ble_connection_changed,
         saki_ble_poll,
         saki_ble_event_received,
-        &s_ble_protocol
+        s_ble_protocol
     );
     if (ret != ESP_OK) {
         ESP_LOGE(

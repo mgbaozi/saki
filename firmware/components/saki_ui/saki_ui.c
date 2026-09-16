@@ -51,6 +51,20 @@ static bool s_demo_mode;
 static TaskHandle_t s_task_handle;
 static esp_err_t s_start_result;
 static saki_state_snapshot_t s_current_snapshot;
+static saki_display_snapshot_t s_current_display;
+#define SAKI_SIDEBAR_LEFT 240
+#define SAKI_SIDEBAR_TOP 28
+#define SAKI_SIDEBAR_ROW_HEIGHT 62
+#define SAKI_SIDEBAR_COUNT (SAKI_DISPLAY_MAX_SESSIONS - 1)
+static bool s_sidebar_dirty = true;
+static int s_selected_session;
+static saki_session_view_t s_session_view;
+static lv_obj_t *s_sidebar;
+static lv_obj_t *s_sidebar_rows[SAKI_SIDEBAR_COUNT];
+static lv_obj_t *s_sidebar_labels[SAKI_SIDEBAR_COUNT];
+static lv_obj_t *s_sidebar_marks[SAKI_SIDEBAR_COUNT];
+static int s_sidebar_indices[SAKI_SIDEBAR_COUNT];
+
 static saki_ui_policy_t s_policy;
 static saki_button_policy_t s_button_policy;
 static saki_ui_button_fn s_button_callback;
@@ -252,6 +266,7 @@ static void saki_label_base(lv_obj_t *label, lv_color_t color)
 {
     lv_obj_set_style_text_color(label, color, 0);
     lv_obj_set_style_text_font(label, &s_font_14, 0);
+    lv_obj_set_style_text_line_space(label, 0, 0);
 }
 
 static void saki_create_screen(void)
@@ -311,7 +326,7 @@ static void saki_create_screen(void)
     lv_obj_set_style_border_width(s_activity_card, 1, 0);
     lv_obj_set_style_border_color(s_activity_card, lv_color_hex(0x253553), 0);
     lv_obj_set_style_radius(s_activity_card, 8, 0);
-    lv_obj_set_style_pad_all(s_activity_card, 10, 0);
+    lv_obj_set_style_pad_all(s_activity_card, 7, 0);
     lv_obj_clear_flag(s_activity_card, LV_OBJ_FLAG_SCROLLABLE);
 
     s_activity_label = lv_label_create(s_activity_card);
@@ -339,9 +354,31 @@ static void saki_create_screen(void)
 
     s_model_label = lv_label_create(footer);
     saki_label_base(s_model_label, lv_color_hex(0x64748B));
-    lv_obj_set_pos(s_model_label, 12, 5);
+    lv_obj_set_pos(s_model_label, 12, 2);
     lv_obj_set_width(s_model_label, 296);
     lv_label_set_long_mode(s_model_label, LV_LABEL_LONG_DOT);
+
+    s_sidebar = lv_obj_create(screen);
+    saki_set_plain_panel(s_sidebar, lv_color_hex(0x111A2E));
+    lv_obj_set_pos(s_sidebar, SAKI_SIDEBAR_LEFT, SAKI_SIDEBAR_TOP);
+    lv_obj_set_size(s_sidebar, 80, 188);
+    for (uint8_t i = 0; i < SAKI_SIDEBAR_COUNT; ++i) {
+        s_sidebar_indices[i] = -1;
+        s_sidebar_rows[i] = lv_obj_create(s_sidebar);
+        saki_set_plain_panel(s_sidebar_rows[i], lv_color_hex(0x151D30));
+        lv_obj_set_pos(s_sidebar_rows[i], 4, 1 + i * SAKI_SIDEBAR_ROW_HEIGHT);
+        lv_obj_set_size(s_sidebar_rows[i], 72, 60);
+        s_sidebar_marks[i] = lv_obj_create(s_sidebar_rows[i]);
+        saki_set_plain_panel(s_sidebar_marks[i], lv_color_hex(0x64748B));
+        lv_obj_set_pos(s_sidebar_marks[i], 0, 4);
+        lv_obj_set_size(s_sidebar_marks[i], 3, 50);
+        s_sidebar_labels[i] = lv_label_create(s_sidebar_rows[i]);
+        saki_label_base(s_sidebar_labels[i], lv_color_hex(0xE2E8F0));
+        lv_obj_set_pos(s_sidebar_labels[i], 8, 0);
+        lv_obj_set_size(s_sidebar_labels[i], 62, 60);
+        lv_label_set_long_mode(s_sidebar_labels[i], LV_LABEL_LONG_CLIP);
+    }
+    lv_obj_add_flag(s_sidebar, LV_OBJ_FLAG_HIDDEN);
 
     s_ble_overlay = lv_obj_create(screen);
     lv_obj_set_pos(s_ble_overlay, 12, 73);
@@ -621,10 +658,45 @@ static void saki_progress_animation_start(void)
     s_progress_animating = true;
 }
 
+static bool saki_has_sidebar(void)
+{
+    return s_current_display.multi_session && s_current_display.count > 1;
+}
+
+static const char *saki_short_state(saki_agent_state_t state)
+{
+    switch (state) {
+    case SAKI_AGENT_STARTING: return "启动中";
+    case SAKI_AGENT_THINKING: return "思考中";
+    case SAKI_AGENT_WORKING: return "执行中";
+    case SAKI_AGENT_WAITING_USER: return "待输入";
+    case SAKI_AGENT_WAITING_APPROVAL: return "待批准";
+    case SAKI_AGENT_COMPLETED: return "已完成";
+    case SAKI_AGENT_FAILED: return "失败";
+    case SAKI_AGENT_CANCELLED: return "已取消";
+    default: return "空闲";
+    }
+}
+
+static void saki_apply_main_layout(void)
+{
+    bool compact = saki_has_sidebar();
+    lv_obj_set_pos(s_status_label, compact ? 60 : 68, 42);
+    lv_obj_set_width(s_status_label, compact ? 172 : 165);
+    lv_obj_set_size(s_status_dot, compact ? 32 : 38, compact ? 32 : 38);
+    lv_obj_set_pos(s_elapsed_label, compact ? 60 : 244, compact ? 66 : 44);
+    lv_obj_set_width(s_elapsed_label, compact ? 172 : 62);
+    lv_obj_set_style_text_align(s_elapsed_label, compact ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_width(s_title_label, compact ? 216 : 288);
+    lv_obj_set_width(s_progress_bar, compact ? 164 : 238);
+    lv_obj_set_pos(s_progress_label, compact ? 188 : 260, 197);
+}
+
 static void saki_apply_text_view(const saki_state_snapshot_t *snapshot)
 {
     const char *summary;
     bool prioritize_detail;
+    lv_coord_t card_width = saki_has_sidebar() ? 220 : 296;
 
     summary = snapshot->activity[0]
         ? snapshot->activity
@@ -637,16 +709,16 @@ static void saki_apply_text_view(const saki_state_snapshot_t *snapshot)
     if (s_policy.detail_visible && snapshot->detail[0] != '\0') {
         lv_obj_add_flag(s_title_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_pos(s_activity_card, 12, 88);
-        lv_obj_set_size(s_activity_card, 296, 106);
-        lv_obj_set_size(s_activity_label, 274, 84);
+        lv_obj_set_size(s_activity_card, card_width, 106);
+        lv_obj_set_size(s_activity_label, card_width - 16, 84);
         lv_label_set_text_fmt(s_activity_label, "DETAIL\n%s", snapshot->detail);
         return;
     }
 
     lv_obj_clear_flag(s_title_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_pos(s_activity_card, 12, 137);
-    lv_obj_set_size(s_activity_card, 296, 57);
-    lv_obj_set_size(s_activity_label, 274, 36);
+    lv_obj_set_size(s_activity_card, card_width, 57);
+    lv_obj_set_size(s_activity_label, card_width - 16, 40);
     lv_label_set_text(
         s_title_label,
         snapshot->task_title[0] ? snapshot->task_title : "Waiting for a task"
@@ -676,6 +748,7 @@ static void saki_apply_brightness(void)
 static void saki_apply_snapshot(const saki_state_snapshot_t *snapshot)
 {
     char progress[16];
+    saki_apply_main_layout();
     lv_color_t state_color = saki_state_color(snapshot);
 
     lv_obj_set_style_bg_color(s_status_dot, state_color, 0);
@@ -694,6 +767,10 @@ static void saki_apply_snapshot(const saki_state_snapshot_t *snapshot)
         snapshot->connected ? saki_state_display_name(snapshot->state) : "DISCONNECTED"
     );
 
+    if (s_current_display.multi_session && snapshot->connected) {
+        lv_label_set_text_fmt(s_status_label, "%s%s", saki_short_state(snapshot->state),
+            snapshot->stale ? " · 过期" : "");
+    }
     saki_apply_text_view(snapshot);
     lv_label_set_text(
         s_model_label,
@@ -738,11 +815,80 @@ static void saki_apply_policy_changes(uint32_t changes)
     }
 }
 
+static void saki_render_sidebar(void)
+{
+    if (!s_sidebar_dirty) return;
+    s_sidebar_dirty = false;
+    if (!s_current_display.multi_session) {
+        lv_obj_add_flag(s_sidebar, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if (saki_has_sidebar()) lv_obj_clear_flag(s_sidebar, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_sidebar, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text_fmt(s_model_label, "%s  %u/%u  !%u%s",
+        s_selected_session > 0 ? "查看 · 顶栏返回" : "最新提交",
+        s_current_display.count, s_current_display.total, s_current_display.hidden_attention,
+        s_current_display.capacity_rejected ? " FULL" : "");
+    if (!s_current_display.count) lv_label_set_text(s_title_label, "暂无会话");
+    uint8_t row = 0;
+    for (uint8_t i = 0; i < s_current_display.count; ++i) {
+        if (i == s_selected_session) continue;
+        const saki_state_snapshot_t *item = &s_current_display.items[i];
+        char short_id[5];
+        (void)saki_utf8_copy(short_id, sizeof(short_id), item->task_id);
+        const char *source = strcmp(item->agent_name, "Claude Code") == 0 ? "Claude" : item->agent_name;
+        s_sidebar_indices[row] = i;
+        lv_obj_clear_flag(s_sidebar_rows[row], LV_OBJ_FLAG_HIDDEN);
+        lv_color_t color = saki_state_color(item);
+        lv_obj_set_style_bg_color(s_sidebar_marks[row], color, 0);
+        lv_obj_set_style_text_color(s_sidebar_labels[row], color, 0);
+        lv_label_set_text_fmt(s_sidebar_labels[row], "%s\n%s%s\n%s", source, short_id,
+            item->stale ? "*" : "", saki_short_state(item->state));
+        ++row;
+    }
+    while (row < SAKI_SIDEBAR_COUNT) {
+        s_sidebar_indices[row] = -1;
+        lv_obj_add_flag(s_sidebar_rows[row++], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void saki_select_session(int index, uint64_t now_ms)
+{
+    s_sidebar_dirty = true;
+    s_selected_session = saki_session_view_select(&s_session_view, &s_current_display, index, now_ms);
+    if (s_current_display.count) {
+        s_current_snapshot = s_current_display.items[s_selected_session];
+        s_policy.detail_visible = false;
+        saki_apply_snapshot(&s_current_snapshot);
+        /* Selection can change elapsed within the same second. */
+        uint64_t ignored = 0;
+        saki_refresh_elapsed(&s_current_snapshot, now_ms, &ignored, true);
+    }
+    saki_render_sidebar();
+}
+
 static void saki_handle_tap(lv_coord_t x, lv_coord_t y)
 {
-    bool in_detail_region = x >= SAKI_DETAIL_LEFT && x < SAKI_DETAIL_RIGHT &&
+    bool in_detail_region = x >= SAKI_DETAIL_LEFT && x < (saki_has_sidebar() ? 232 : SAKI_DETAIL_RIGHT) &&
         y >= SAKI_DETAIL_TOP && y < SAKI_DETAIL_BOTTOM;
     uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    if (s_current_display.multi_session) {
+        bool was_dim = s_policy.backlight_percent < s_policy.config.active_percent;
+        saki_apply_policy_changes(saki_ui_policy_on_local_activity(&s_policy, now_ms));
+        if (was_dim || s_button_overlay_visible || s_ble_notice_visible) return;
+        if (saki_has_sidebar() && x >= SAKI_SIDEBAR_LEFT &&
+            y >= SAKI_SIDEBAR_TOP && y < 216) {
+            int row = (y - SAKI_SIDEBAR_TOP) / SAKI_SIDEBAR_ROW_HEIGHT;
+            if (row < SAKI_SIDEBAR_COUNT && s_sidebar_indices[row] >= 0)
+                saki_select_session(s_sidebar_indices[row], now_ms);
+            return;
+        }
+        if (s_selected_session > 0 && y < SAKI_SIDEBAR_TOP) {
+            saki_select_session(0, now_ms);
+            return;
+        }
+        if (s_selected_session > 0) s_session_view.deadline_ms = now_ms + SAKI_DETAIL_TIMEOUT_MS;
+    }
     uint32_t changes = saki_ui_policy_on_tap(
         &s_policy,
         &s_current_snapshot,
@@ -840,7 +986,6 @@ static void saki_demo_snapshot(size_t index, saki_state_snapshot_t *snapshot)
 static void saki_ui_task(void *argument)
 {
     TaskHandle_t start_waiter = (TaskHandle_t)argument;
-    saki_state_snapshot_t update;
     saki_ui_ble_message_t ble_message;
     TickType_t last_demo_tick = xTaskGetTickCount();
     TickType_t last_button_tick = xTaskGetTickCount();
@@ -892,7 +1037,15 @@ static void saki_ui_task(void *argument)
         saki_button_policy_init(&s_button_policy, false, now_ms);
     }
     saki_state_snapshot_init(&s_current_snapshot);
-    if (xQueueReceive(s_state_queue, &s_current_snapshot, 0) != pdTRUE) {
+    if (xQueueReceive(s_state_queue, &s_current_display, 0) == pdTRUE) {
+        s_selected_session = saki_session_view_update(&s_session_view, &s_current_display, now_ms);
+        if (s_current_display.count) s_current_snapshot = s_current_display.items[0];
+        else {
+            s_current_snapshot.connected = s_current_display.connected;
+            snprintf(s_current_snapshot.transport, sizeof(s_current_snapshot.transport),
+                "%s", s_current_display.transport);
+        }
+    } else {
         s_current_snapshot.connected = false;
     }
     saki_apply_snapshot(&s_current_snapshot);
@@ -940,9 +1093,25 @@ static void saki_ui_task(void *argument)
             saki_ble_overlay_set_notice(&ble_message, now_ms);
         }
 
-        if (xQueueReceive(s_state_queue, &update, 0) == pdTRUE) {
+        if (xQueueReceive(s_state_queue, &s_current_display, 0) == pdTRUE) {
             now_ms = (uint64_t)(esp_timer_get_time() / 1000);
-            saki_state_snapshot_copy(&s_current_snapshot, &update);
+            s_sidebar_dirty = true;
+            bool new_submission = s_current_display.multi_session && s_current_display.count > 0 &&
+                (strcmp(s_session_view.latest_id, s_current_display.items[0].task_id) != 0 ||
+                 strcmp(s_session_view.latest_run, s_current_display.run_ids[0]) != 0);
+            s_selected_session = saki_session_view_update(&s_session_view, &s_current_display, now_ms);
+            if (s_current_display.count > 0) {
+                if (new_submission || strcmp(s_current_snapshot.task_id,
+                    s_current_display.items[s_selected_session].task_id) != 0) {
+                    s_policy.detail_visible = false;
+                }
+                s_current_snapshot = s_current_display.items[s_selected_session];
+            } else {
+                saki_state_snapshot_init(&s_current_snapshot);
+                s_current_snapshot.connected = s_current_display.connected;
+                snprintf(s_current_snapshot.transport, sizeof(s_current_snapshot.transport),
+                    "%s", s_current_display.transport);
+            }
             policy_changes = saki_ui_policy_on_snapshot(
                 &s_policy,
                 &s_current_snapshot,
@@ -998,6 +1167,10 @@ static void saki_ui_task(void *argument)
             false
         );
 
+        if (s_current_display.multi_session) {
+            if (s_selected_session > 0 && now_ms >= s_session_view.deadline_ms) saki_select_session(0, now_ms);
+        }
+        saki_render_sidebar();
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(SAKI_UI_HANDLER_MS));
     }
@@ -1033,7 +1206,7 @@ esp_err_t saki_ui_start(const saki_state_snapshot_t *initial_state, bool demo_mo
     if (s_state_queue != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    s_state_queue = xQueueCreate(1, sizeof(saki_state_snapshot_t));
+    s_state_queue = xQueueCreate(1, sizeof(saki_display_snapshot_t));
     s_ble_queue = xQueueCreate(1, sizeof(saki_ui_ble_message_t));
     if (s_state_queue == NULL || s_ble_queue == NULL) {
         if (s_state_queue != NULL) {
@@ -1047,7 +1220,7 @@ esp_err_t saki_ui_start(const saki_state_snapshot_t *initial_state, bool demo_mo
         return ESP_ERR_NO_MEM;
     }
     if (initial_state != NULL) {
-        xQueueOverwrite(s_state_queue, initial_state);
+        (void)saki_ui_submit(initial_state);
     }
     s_demo_mode = demo_mode;
     s_start_result = ESP_ERR_INVALID_STATE;
@@ -1135,11 +1308,25 @@ esp_err_t saki_ui_submit_tracked(
         return ESP_ERR_INVALID_STATE;
     }
     pending = uxQueueMessagesWaiting(s_state_queue) > 0;
-    if (xQueueOverwrite(s_state_queue, snapshot) != pdPASS) {
-        return ESP_FAIL;
-    }
+    saki_display_snapshot_t *display = calloc(1, sizeof(*display));
+    if (display == NULL) return ESP_ERR_NO_MEM;
+    display->count = 1;
+    display->total = 1;
+    display->connected = snapshot->connected;
+    display->items[0] = *snapshot;
+    snprintf(display->transport, sizeof(display->transport), "%s", snapshot->transport);
+    BaseType_t queued = xQueueOverwrite(s_state_queue, display);
+    free(display);
+    if (queued != pdPASS) return ESP_FAIL;
     if (overwrote_pending != NULL) {
         *overwrote_pending = pending;
     }
     return ESP_OK;
+}
+
+esp_err_t saki_ui_submit_display(const saki_display_snapshot_t *display)
+{
+    if (display == NULL || display->count > SAKI_DISPLAY_MAX_SESSIONS) return ESP_ERR_INVALID_ARG;
+    if (s_state_queue == NULL) return ESP_ERR_INVALID_STATE;
+    return xQueueOverwrite(s_state_queue, display) == pdPASS ? ESP_OK : ESP_FAIL;
 }

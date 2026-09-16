@@ -65,6 +65,19 @@ uint32_t saki_ui_policy_tick(
 
 uint8_t saki_ui_policy_dimming_opacity(uint8_t brightness_percent);
 
+/* sessions[0] is the Host's latest submitted session. Local browsing is temporary. */
+typedef struct {
+    char latest_id[SAKI_TASK_ID_CAPACITY];
+    char latest_run[33];
+    char selected_id[SAKI_TASK_ID_CAPACITY];
+    uint64_t deadline_ms;
+} saki_session_view_t;
+
+int saki_session_view_update(saki_session_view_t *view,
+    const saki_display_snapshot_t *display, uint64_t now_ms);
+int saki_session_view_select(saki_session_view_t *view,
+    const saki_display_snapshot_t *display, int index, uint64_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

@@ -128,6 +128,7 @@ bool saki_state_elapsed_is_running(const saki_state_snapshot_t *snapshot)
 {
     return snapshot != NULL &&
            snapshot->connected &&
+           !snapshot->stale &&
            snapshot->state != SAKI_AGENT_IDLE &&
            !saki_state_is_terminal(snapshot->state);
 }

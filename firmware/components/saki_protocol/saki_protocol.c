@@ -11,6 +11,28 @@
 #define SAKI_PROTOCOL_VERSION 1
 #define SAKI_PROTOCOL_MAX_INVALID_STREAK 5
 
+/* Bound cJSON recursion and reject embedded NULs before allocating a tree. */
+static bool saki_json_frame_bounded(const char *frame, size_t length)
+{
+    unsigned depth = 0;
+    bool quoted = false, escaped = false;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char ch = frame[i];
+        if (ch == 0) return false;
+        if (quoted) {
+            if (escaped) {
+                /* cJSON strings are NUL terminated; escaped NUL would truncate identity. */
+                if (ch == 'u' && i + 4 < length && memcmp(frame + i + 1, "0000", 4) == 0) return false;
+                escaped = false;
+            } else if (ch == '\\') escaped = true;
+            else if (ch == '"') quoted = false;
+        } else if (ch == '"') quoted = true;
+        else if (ch == '{' || ch == '[') { if (++depth > 16) return false; }
+        else if (ch == '}' || ch == ']') { if (depth == 0) return false; --depth; }
+    }
+    return depth == 0 && !quoted;
+}
+
 static void saki_protocol_handle_frame(
     const char *frame,
     size_t length,
@@ -211,6 +233,8 @@ static uint32_t saki_protocol_next_id(saki_protocol_engine_t *engine)
 static void saki_protocol_reset_session(saki_protocol_engine_t *engine)
 {
     engine->handshaken = false;
+    engine->multi_session = false;
+    engine->has_committed_display = false;
     engine->has_last_seq = false;
     engine->has_last_activity = false;
     engine->last_seq = 0;
@@ -490,6 +514,8 @@ static void saki_protocol_handle_hello(
     uint32_t request_id
 )
 {
+    const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    bool multi = cJSON_IsString(mode) && strcmp(mode->valuestring, "multi-session") == 0;
     const cJSON *role = cJSON_GetObjectItemCaseSensitive(root, "role");
     const cJSON *session = cJSON_GetObjectItemCaseSensitive(root, "session");
     char response[SAKI_PROTOCOL_TX_CAPACITY];
@@ -510,6 +536,12 @@ static void saki_protocol_handle_hello(
         return;
     }
 
+    if (mode != NULL && (!multi || engine->submit_display == NULL)) {
+        saki_protocol_send_error(engine, true, request_id, "invalid_field", "unsupported mode", true);
+        return;
+    }
+    engine->multi_session = multi;
+    engine->has_committed_display = false;
     snprintf(engine->session, sizeof(engine->session), "%s", session->valuestring);
     saki_protocol_increment(&engine->diagnostics.valid_frames);
     engine->handshaken = true;
@@ -525,7 +557,7 @@ static void saki_protocol_handle_hello(
         ",\"reply_to\":%" PRIu32
         ",\"role\":\"device\",\"device\":{\"name\":\"saki-box3\",\"fw\":\"%s\",\"id\":\"%s\"},"
         "\"screen\":{\"width\":320,\"height\":240},"
-        "\"capabilities\":[\"status\",\"progress\",\"utf8\",\"touch-detail\"%s%s%s]}\n",
+        "\"capabilities\":[\"status\",\"progress\",\"utf8\",\"touch-detail\"%s%s%s%s]%s}\n",
         saki_protocol_next_id(engine),
         request_id,
         engine->firmware_version,
@@ -539,7 +571,9 @@ static void saki_protocol_handle_hello(
         (engine->capability_flags &
          SAKI_PROTOCOL_CAPABILITY_TRANSPORT_ARBITRATION) != 0
             ? ",\"transport-arbitration\""
-            : ""
+            : "",
+        engine->submit_display != NULL ? ",\"multi-session\"" : "",
+        multi ? ",\"mode\":\"multi-session\"" : ""
     );
     (void)saki_protocol_send(engine, response, length);
 }
@@ -638,6 +672,10 @@ static void saki_protocol_handle_status(
     saki_state_snapshot_t snapshot;
     saki_agent_state_t parsed_state;
 
+    if (engine->multi_session) {
+        saki_protocol_send_error(engine, true, request_id, "invalid_field", "legacy write in multi mode", false);
+        return;
+    }
     if (!engine->handshaken) {
         saki_protocol_send_error(
             engine,
@@ -721,6 +759,104 @@ static void saki_protocol_handle_status(
     saki_protocol_submit_snapshot(engine, &snapshot, request_id, sequence);
 }
 
+static void saki_protocol_handle_sessions(
+    saki_protocol_engine_t *engine, const cJSON *root, uint32_t request_id, const char *frame, size_t frame_length
+)
+{
+    uint32_t sequence, total, hidden, rejected;
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(root, "sessions");
+    saki_display_snapshot_t *display = &engine->display_candidate;
+    if (!engine->handshaken || !engine->multi_session || engine->submit_display == NULL) {
+        saki_protocol_send_error(engine, true, request_id, "not_handshaken", "multi-session hello required", true);
+        return;
+    }
+    if (!saki_protocol_session_matches(engine, root) ||
+        !saki_json_uint32(root, "seq", &sequence) || !cJSON_IsArray(items) ||
+        cJSON_GetArraySize(items) > SAKI_DISPLAY_MAX_SESSIONS ||
+        !saki_json_uint32(root, "total", &total) || total > 32 ||
+        total < (uint32_t)cJSON_GetArraySize(items) ||
+        !saki_json_uint32(root, "hidden_attention", &hidden) || hidden > total - cJSON_GetArraySize(items) ||
+        !saki_json_uint32(root, "capacity_rejected", &rejected)) {
+        goto invalid;
+    }
+    memset(display, 0, sizeof(*display));
+    display->multi_session = true;
+    display->connected = true;
+    display->count = cJSON_GetArraySize(items);
+    display->total = total;
+    display->hidden_attention = hidden;
+    display->capacity_rejected = rejected;
+    snprintf(display->transport, sizeof(display->transport), "%s", saki_transport_name(engine->transport));
+    for (uint8_t i = 0; i < display->count; ++i) {
+        const cJSON *item = cJSON_GetArrayItem(items, i);
+        const cJSON *source = cJSON_GetObjectItemCaseSensitive(item, "source");
+        const cJSON *fresh = cJSON_GetObjectItemCaseSensitive(item, "fresh");
+        if (!cJSON_IsObject(item) || !saki_protocol_parse_snapshot(engine, item, &display->items[i]) ||
+            !cJSON_IsString(source) || !cJSON_IsBool(fresh) ||
+            !saki_json_uint32(item, "revision", &display->revisions[i]) ||
+            !saki_copy_json_text(item, "run_id", display->run_ids[i], sizeof(display->run_ids[i]), true, false) ||
+            display->items[i].task_id[0] == '\0') {
+            goto invalid;
+        }
+        const char *label;
+        if (strcmp(source->valuestring, "codex") == 0) label = "Codex";
+        else if (strcmp(source->valuestring, "claude_code") == 0) label = "Claude Code";
+        else if (strcmp(source->valuestring, "legacy") == 0) label = "Agent";
+        else goto invalid;
+        if (strcmp(source->valuestring, "legacy") != 0) {
+            if (strlen(display->items[i].task_id) != 32) goto invalid;
+            for (size_t k = 0; k < 32; ++k) {
+                char ch = display->items[i].task_id[k];
+                if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) goto invalid;
+            }
+        }
+        for (size_t k = 0; display->run_ids[i][k]; ++k) {
+            char ch = display->run_ids[i][k];
+            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') ||
+                  (ch >= 'A' && ch <= 'Z') || ch == '-' || ch == '_')) goto invalid;
+        }
+        snprintf(display->items[i].agent_name, sizeof(display->items[i].agent_name), "%s", label);
+        display->items[i].stale = !cJSON_IsTrue(fresh);
+        for (uint8_t j = 0; j < i; ++j) {
+            if (strcmp(display->items[i].task_id, display->items[j].task_id) == 0) goto invalid;
+        }
+    }
+    saki_protocol_mark_activity(engine);
+    for (uint8_t i = 0; i < display->count; ++i) display->items[i].received_at_ms = engine->last_activity_ms;
+    saki_transport_outcome_t outcome = engine->submit_display(
+        display, engine->transport, engine->session, sequence, engine->last_activity_ms, engine->callback_context);
+    if (outcome.has_last_seq) {
+        engine->last_seq = outcome.last_seq;
+        engine->has_last_seq = true;
+    }
+    bool applied = outcome.result == SAKI_TRANSPORT_APPLIED;
+    bool committed = applied || (outcome.result == SAKI_TRANSPORT_STALE &&
+        engine->has_committed_display && engine->committed_display_seq == sequence &&
+        engine->committed_display_length == frame_length &&
+        memcmp(engine->committed_display_frame, frame, frame_length) == 0 && engine->last_seq == sequence);
+    if (outcome.result != SAKI_TRANSPORT_APPLIED && outcome.result != SAKI_TRANSPORT_STALE) {
+        saki_protocol_send_error(engine, true, request_id, "busy", "display commit rejected", false);
+        return;
+    }
+    if (applied) {
+        engine->has_committed_display = true;
+        engine->committed_display_seq = sequence;
+        engine->committed_display_length = frame_length;
+        memcpy(engine->committed_display_frame, frame, frame_length);
+    }
+    char response[256];
+    int length = snprintf(response, sizeof(response),
+        "{\"v\":1,\"type\":\"ack\",\"id\":%" PRIu32 ",\"reply_to\":%" PRIu32
+        ",\"ok\":true,\"applied\":%s,\"committed\":%s,\"last_seq\":%" PRIu32 "}\n",
+        saki_protocol_next_id(engine), request_id, applied ? "true" : "false", committed ? "true" : "false", engine->last_seq);
+    (void)saki_protocol_send(engine, response, length);
+    engine->invalid_streak = 0;
+    saki_protocol_increment(&engine->diagnostics.valid_frames);
+    return;
+invalid:
+    saki_protocol_send_error(engine, true, request_id, "invalid_field", "invalid display set", true);
+}
+
 static void saki_protocol_handle_clear(
     saki_protocol_engine_t *engine,
     const cJSON *root,
@@ -730,6 +866,10 @@ static void saki_protocol_handle_clear(
     uint32_t sequence;
     saki_state_snapshot_t snapshot;
 
+    if (engine->multi_session) {
+        saki_protocol_send_error(engine, true, request_id, "invalid_field", "legacy write in multi mode", false);
+        return;
+    }
     if (!engine->handshaken) {
         saki_protocol_send_error(
             engine,
@@ -899,7 +1039,7 @@ static void saki_protocol_handle_frame(
     uint32_t request_id = 0;
     bool has_request_id;
 
-    if (!saki_utf8_validate((const uint8_t *)frame, length)) {
+    if (!saki_utf8_validate((const uint8_t *)frame, length) || !saki_json_frame_bounded(frame, length)) {
         saki_protocol_send_error(
             engine,
             false,
@@ -910,9 +1050,11 @@ static void saki_protocol_handle_frame(
         );
         return;
     }
-    root = cJSON_ParseWithLength(frame, length);
+    const char *end = NULL;
+    root = cJSON_ParseWithLengthOpts(frame, length, &end, false);
+    while (end != NULL && end < frame + length && (*end == ' ' || *end == '\t' || *end == '\r')) ++end;
 
-    if (root == NULL || !cJSON_IsObject(root)) {
+    if (root == NULL || !cJSON_IsObject(root) || end != frame + length) {
         cJSON_Delete(root);
         saki_protocol_send_error(
             engine,
@@ -966,6 +1108,8 @@ static void saki_protocol_handle_frame(
         );
     } else if (strcmp(type->valuestring, "hello") == 0) {
         saki_protocol_handle_hello(engine, root, request_id);
+    } else if (strcmp(type->valuestring, "sessions") == 0) {
+        saki_protocol_handle_sessions(engine, root, request_id, frame, length);
     } else if (strcmp(type->valuestring, "status") == 0) {
         saki_protocol_handle_status(engine, root, request_id);
     } else if (strcmp(type->valuestring, "clear") == 0) {

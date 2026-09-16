@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import stat
 import time
@@ -83,17 +84,40 @@ def deliver_snapshot(snapshot: StateSnapshot, socket_path: Path = DEFAULT_SOCKET
 
 
 class HookDatagramProtocol:
-    def __init__(self, receive: Callable[[StateSnapshot, int | None], None]) -> None:
+    def __init__(
+        self,
+        receive: Callable[[StateSnapshot, int | None], None],
+        receive_event=None,
+        forget_session=None,
+    ) -> None:
         self._receive = receive
+        self._receive_event = receive_event
+        self._forget_session = forget_session
 
     def connection_made(self, transport: object) -> None:
         self.transport = transport
 
     def datagram_received(self, data: bytes, address: object) -> None:
         del address
+        if self._forget_session is not None:
+            try:
+                command = decode_forget(data)
+            except (ValueError, TypeError, RecursionError):
+                pass
+            else:
+                self._forget_session(command)
+                return
+        if self._receive_event is not None:
+            try:
+                event = decode_source_event(data)
+            except (ValueError, TypeError, KeyError, RecursionError):
+                pass
+            else:
+                self._receive_event(event)
+                return
         try:
             envelope = decode_snapshot_envelope(data)
-        except ValueError:
+        except (ValueError, TypeError, KeyError, RecursionError):
             return
         self._receive(envelope.snapshot, envelope.emitted_monotonic_ns)
 
@@ -116,3 +140,70 @@ def prepare_socket_path(socket_path: Path) -> None:
 
 def protect_socket(socket_path: Path) -> None:
     os.chmod(socket_path, 0o600)
+
+
+def encode_source_event(event) -> bytes:
+    from .adapters import SourceEvent
+
+    if not isinstance(event, SourceEvent):
+        raise TypeError("invalid source event")
+    data = json.dumps(
+        {"v": 2, "type": "source_event", "event": event.to_dict()},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    if len(data) > MAX_DATAGRAM_BYTES:
+        raise ValueError("event too large")
+    return data
+
+
+def decode_source_event(data: bytes):
+    from .adapters import SourceEvent
+
+    if not 0 < len(data) <= MAX_DATAGRAM_BYTES:
+        raise ValueError("invalid event size")
+    value = json.loads(data)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"v", "type", "event"}
+        or value.get("v") != 2
+        or value.get("type") != "source_event"
+    ):
+        raise ValueError("invalid event envelope")
+    return SourceEvent.from_dict(value["event"])
+
+
+def deliver_source_event(event, socket_path: Path = DEFAULT_SOCKET_PATH) -> None:
+    data = encode_source_event(event)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+        client.settimeout(0.05)
+        client.sendto(data, str(socket_path))
+
+
+def encode_forget(session_id: str) -> bytes:
+    if not isinstance(session_id, str) or not re.fullmatch(r"(?:[0-9a-f]{32}|all)", session_id):
+        raise ValueError("use a pseudonymous session ID or all")
+    return json.dumps({"v": 2, "type": "forget", "session_id": session_id}).encode()
+
+
+def decode_forget(data: bytes) -> str:
+    if not 0 < len(data) <= MAX_DATAGRAM_BYTES:
+        raise ValueError("invalid command size")
+    command = json.loads(data)
+    if (
+        not isinstance(command, dict)
+        or set(command) != {"v", "type", "session_id"}
+        or command["v"] != 2
+        or command["type"] != "forget"
+    ):
+        raise ValueError("invalid command")
+    encode_forget(command["session_id"])
+    return command["session_id"]
+
+
+def forget_session(session_id: str, socket_path: Path = DEFAULT_SOCKET_PATH) -> None:
+    data = encode_forget(session_id)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+        client.settimeout(0.05)
+        client.sendto(data, str(socket_path))

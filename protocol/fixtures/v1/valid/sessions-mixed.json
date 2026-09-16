@@ -1,0 +1,100 @@
+{
+  "v": 1,
+  "type": "sessions",
+  "id": 1,
+  "session": "00000000-0000-4000-8000-000000000001",
+  "seq": 1,
+  "total": 4,
+  "hidden_attention": 0,
+  "capacity_rejected": 0,
+  "sessions": [
+    {
+      "source": "codex",
+      "run_id": "local-1",
+      "revision": 1,
+      "fresh": true,
+      "state": "starting",
+      "agent": {
+        "name": "Codex"
+      },
+      "task": {
+        "id": "1dbc44c21f4ef6d04dcd85e876ebd48f",
+        "title": "Codex 任务 1dbc"
+      },
+      "activity": {
+        "kind": "other",
+        "summary": "正在开始任务"
+      },
+      "progress": {
+        "mode": "indeterminate"
+      },
+      "elapsed_ms": 1000
+    },
+    {
+      "source": "claude_code",
+      "run_id": "local-1",
+      "revision": 1,
+      "fresh": true,
+      "state": "waiting_approval",
+      "agent": {
+        "name": "Claude Code"
+      },
+      "task": {
+        "id": "9f3dea9c6c917f547d4a78002a3e135a",
+        "title": "Claude Code 任务 9f3d"
+      },
+      "activity": {
+        "kind": "other",
+        "summary": "等待用户批准"
+      },
+      "progress": {
+        "mode": "none"
+      },
+      "elapsed_ms": 1000
+    },
+    {
+      "source": "claude_code",
+      "run_id": "local-1",
+      "revision": 1,
+      "fresh": true,
+      "state": "starting",
+      "agent": {
+        "name": "Claude Code"
+      },
+      "task": {
+        "id": "b5389253d27b88449a895ade3948cb7f",
+        "title": "Claude Code 任务 b538"
+      },
+      "activity": {
+        "kind": "other",
+        "summary": "正在开始任务"
+      },
+      "progress": {
+        "mode": "indeterminate"
+      },
+      "elapsed_ms": 1000
+    },
+    {
+      "source": "codex",
+      "run_id": "local-1",
+      "revision": 1,
+      "fresh": true,
+      "state": "starting",
+      "agent": {
+        "name": "Codex"
+      },
+      "task": {
+        "id": "c1f69d0448b6824dc2f39b4e1bc1d030",
+        "title": "Codex 任务 c1f6"
+      },
+      "activity": {
+        "kind": "other",
+        "summary": "正在开始任务"
+      },
+      "progress": {
+        "mode": "indeterminate"
+      },
+      "elapsed_ms": 1000
+    }
+  ]
+}

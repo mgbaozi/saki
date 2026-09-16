@@ -1,6 +1,40 @@
 #include "saki_ui_policy.h"
 
 #include <string.h>
+#include <stdio.h>
+
+int saki_session_view_update(saki_session_view_t *view,
+    const saki_display_snapshot_t *display, uint64_t now_ms)
+{
+    if (!display->multi_session || display->count == 0) {
+        memset(view, 0, sizeof(*view));
+        return 0;
+    }
+    if (strcmp(view->latest_id, display->items[0].task_id) != 0 ||
+        strcmp(view->latest_run, display->run_ids[0]) != 0 || now_ms >= view->deadline_ms) {
+        view->selected_id[0] = '\0';
+    }
+    snprintf(view->latest_id, sizeof(view->latest_id), "%s", display->items[0].task_id);
+    snprintf(view->latest_run, sizeof(view->latest_run), "%s", display->run_ids[0]);
+    for (uint8_t i = 1; i < display->count; ++i) {
+        if (strcmp(view->selected_id, display->items[i].task_id) == 0) return i;
+    }
+    view->selected_id[0] = '\0';
+    return 0;
+}
+
+int saki_session_view_select(saki_session_view_t *view,
+    const saki_display_snapshot_t *display, int index, uint64_t now_ms)
+{
+    (void)saki_session_view_update(view, display, now_ms);
+    view->selected_id[0] = '\0';
+    if (display->multi_session && index > 0 && index < display->count) {
+        snprintf(view->selected_id, sizeof(view->selected_id), "%s", display->items[index].task_id);
+        view->deadline_ms = now_ms + 15000;
+        return index;
+    }
+    return 0;
+}
 
 static bool saki_ui_timeout_reached(
     uint64_t now_ms,

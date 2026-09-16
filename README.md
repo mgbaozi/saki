@@ -4,11 +4,11 @@ Saki 是一块放在桌面上的 AI Agent 状态屏。它由 ESP32-S3 设备和 
 把 Codex 等 Agent 的工作状态同步到独立屏幕，让你不切换窗口也能看到任务正在思考、执行、
 等待操作，还是已经完成。
 
-当前硬件目标是正点原子 ATK-DNESP32S3B3 / ESP32S3 BOX3，使用 320×240 横屏。0.3.0-dev
-正在实现 USB CDC 优先、安全 BLE fallback 和双传输仲裁；代码与离线构建已经贯通，真机
-配对、切换与稳定性验收尚未完成。具体边界见 [0.3.0 规格](./docs/versions/0.3.0/SPEC.md)，
-Wi-Fi fallback 仍在[路线图](./docs/ROADMAP.md)。
-
+当前开发版本为 **0.4.0-dev**：支持 Codex / Claude Code 多 Session，Host 最多跟踪 32 项、
+设备以最新提交主屏及其他 Session 侧栏最多显示 4 项。核心代码、离线检查和固件构建已通过；0.4 的真机混合并发、触摸、
+USB/BLE 切换与资源验收尚未完成。范围见 [0.4 规格](./docs/versions/0.4.0/SPEC.md)，
+安装见 [0.4 用户指南](./docs/versions/0.4.0/USER_GUIDE.md)。目标硬件为正点原子
+ATK-DNESP32S3B3 / ESP32S3 BOX3，320×240 横屏。
 ## 实机效果
 
 | 正在思考 | 任务完成 |
@@ -17,19 +17,21 @@ Wi-Fi fallback 仍在[路线图](./docs/ROADMAP.md)。
 
 ## 主要能力
 
+- Codex / Claude Code 多 Session 独立计时、最新提交主屏与状态侧栏、脱敏身份和恢复。
+
 - 展示启动、思考、执行、等待用户、等待批准、完成、失败、取消和空闲状态。
 - 显示中英文任务标题、动作摘要、活动类型、执行时间和确定/未知进度。
 - 执行时间由设备持续更新，新事件到达时自动校准；未知进度使用平滑循环动画。
 - 支持触摸切换摘要与详情、自动返回、暗屏唤醒和断线状态提示。
 - 自动发现 USB 设备，并处理握手、ACK/重试、心跳、热插拔和会话恢复。
-- 0.3.0-dev 可选支持 BLE：K2 本地配对授权、加密绑定、USB 优先自动切换和手动暂停重连。
+- 可选支持 BLE：K2 本地配对授权、加密绑定、USB 优先自动切换和手动暂停重连。
 - Agent 事件在 Mac 上归一化和脱敏，不向设备发送隐藏思维链或完整工具输出。
 - 内置常用简体中文字库，任务标题和固定文案可直接显示中文。
 
 ## 工作方式
 
 ```text
-Codex lifecycle hooks
+Codex / Claude Code lifecycle hooks
         │  本地 Unix Domain Socket
         ▼
 saki-host on macOS ── USB CDC / BLE GATT + NDJSON ── ESP32-S3 firmware ── LCD
@@ -53,7 +55,7 @@ python3.12 -m venv host/.venv
 host/.venv/bin/pip install -e 'host[dev]'
 ```
 
-需要开发和验证 0.3 BLE 时安装可选依赖：
+需要开发和验证 BLE 时安装可选依赖：
 
 ```zsh
 host/.venv/bin/pip install -e 'host[dev,ble]'
@@ -140,6 +142,8 @@ scripts/build-firmware-tests.zsh
 - [0.3.0 工程实施设计](./docs/versions/0.3.0/IMPLEMENTATION.md)
 - [0.3.0 实施任务与验证记录](./docs/versions/0.3.0/TASKS.md)
 - [0.3.0 用户安装与排障指南](./docs/versions/0.3.0/USER_GUIDE.md)
+- [0.4.0 Codex / Claude Code 多 Session 规格](./docs/versions/0.4.0/SPEC.md)
+- [0.4.5 Claude Code hook 支持规划](./docs/versions/0.4.5/SPEC.md)
 - [发布说明](./docs/releases/0.2.0.md)
 - [0.2.0 已发布文档](./docs/versions/0.2.0/SPEC.md)
 - [后续路线图](./docs/ROADMAP.md)

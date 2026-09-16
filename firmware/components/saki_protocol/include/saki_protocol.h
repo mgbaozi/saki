@@ -65,6 +65,11 @@ typedef saki_transport_outcome_t (*saki_protocol_candidate_fn)(
     void *context
 );
 
+typedef saki_transport_outcome_t (*saki_protocol_display_fn)(
+    const saki_display_snapshot_t *display, saki_transport_id_t transport,
+    const char *session, uint32_t sequence, uint64_t now_ms, void *context
+);
+
 typedef enum {
     SAKI_PROTOCOL_CAPABILITY_NONE = 0,
     SAKI_PROTOCOL_CAPABILITY_BLE = 1U << 0,
@@ -108,6 +113,13 @@ typedef void (*saki_protocol_runtime_fn)(
 typedef struct {
     saki_ndjson_framer_t framer;
     bool handshaken;
+    bool multi_session;
+    bool has_committed_display;
+    uint32_t committed_display_seq;
+    size_t committed_display_length;
+    char committed_display_frame[SAKI_PROTOCOL_MAX_FRAME];
+    saki_display_snapshot_t display_candidate;
+    saki_protocol_display_fn submit_display;
     bool has_last_seq;
     uint32_t last_seq;
     uint32_t next_id;

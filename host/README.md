@@ -12,7 +12,7 @@ scripts/check.zsh
 host/.venv/bin/saki-host demo
 ```
 
-The development package version is `0.3.0.dev0`. USB remains available without
+The development package version is `0.4.0.dev0`. USB remains available without
 Bluetooth dependencies. For BLE development on macOS, install the optional
 extra and complete first pairing in the foreground:
 
@@ -46,3 +46,29 @@ processes never open the USB serial device directly; the single persistent Host
 session owns USB/BLE discovery, handshaking, ACK/retry, heartbeat, transport
 priority and reconnection. `serve --transport auto` prefers USB and only uses a
 previously verified BLE binding as fallback.
+
+## Multiple coding agents and sessions (0.4 development)
+
+Codex and Claude Code adapters normalize allowlisted lifecycle metadata, filtered goals and
+HMAC identities. The registry keeps at most 32 sessions and projects a stable
+four-item full set (latest submission first, then attention-ranked sidebar items);
+older firmware receives the same main session. Private checkpoints
+restore as unconfirmed. On user submission, the hook reads task_title or prompt
+in memory and derives a goal using local filtering and first-sentence truncation
+(up to 48 characters and 96 UTF-8 bytes). This is not semantic summarization or
+complete anonymization: retained text is copied verbatim, and a short prompt may
+become the entire title. Rules remove recognized secrets, URLs and absolute paths;
+relative paths, filenames and unrecognized sensitive content may remain.
+
+The derived goal travels through local IPC, is stored in the private checkpoint,
+and is sent to the device as task.title. The raw hook object and a separate full
+prompt field are not persisted or forwarded. Transcripts, tool arguments/results
+and model replies are not used to derive goals. Normal service sync logs omit goal
+text; explicit `hook --stdout` diagnostics include it. See the
+[0.4 privacy contract](../docs/versions/0.4.0/SPEC.md#2-身份来源和隐私).
+
+Use `saki-host hooks install|check|uninstall --source claude_code` (or `codex`),
+choosing user or explicit project scope once. `saki-host sessions list` reads the
+latest checkpoint; `sessions forget <id|all>` requests display-only cleanup.
+See the [0.4 guide](../docs/versions/0.4.0/USER_GUIDE.md) for configuration preservation,
+real API probe costs, source limitations and remaining hardware validation.

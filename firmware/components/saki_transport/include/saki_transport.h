@@ -44,10 +44,15 @@ typedef esp_err_t (*saki_transport_apply_fn)(
     void *context
 );
 
+typedef esp_err_t (*saki_transport_apply_display_fn)(
+    const saki_display_snapshot_t *display, void *context
+);
+
 typedef struct {
     saki_transport_id_t active;
     saki_transport_id_t last_applied_transport;
     bool has_session;
+    bool multi_session;
     bool has_last_seq;
     bool usb_grace_active;
     uint32_t last_seq;
@@ -55,6 +60,7 @@ typedef struct {
     char session[SAKI_TRANSPORT_SESSION_CAPACITY];
     saki_transport_diagnostics_t diagnostics;
     saki_transport_apply_fn apply;
+    saki_transport_apply_display_fn apply_display;
     void *apply_context;
 } saki_transport_manager_t;
 
@@ -71,6 +77,12 @@ saki_transport_outcome_t saki_transport_manager_submit(
     uint32_t sequence,
     const saki_state_snapshot_t *snapshot,
     uint64_t now_ms
+);
+
+saki_transport_outcome_t saki_transport_manager_submit_display(
+    saki_transport_manager_t *manager, saki_transport_id_t transport,
+    const char *session, uint32_t sequence,
+    const saki_display_snapshot_t *display, uint64_t now_ms
 );
 
 bool saki_transport_manager_link_down(

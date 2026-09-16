@@ -5,26 +5,76 @@
   "$defs": {
     "hello": {
       "allOf": [
-        {"$ref": "envelope.schema.json"},
+        {
+          "$ref": "envelope.schema.json"
+        },
         {
           "type": "object",
-          "required": ["id", "role"],
+          "required": [
+            "id",
+            "role"
+          ],
           "properties": {
-            "type": {"const": "hello"},
-            "role": {"enum": ["host", "device"]},
-            "client": {"type": "object"},
-            "device": {"type": "object"},
-            "screen": {"type": "object"},
-            "capabilities": {"type": "array", "items": {"type": "string"}}
+            "type": {
+              "const": "hello"
+            },
+            "role": {
+              "enum": [
+                "host",
+                "device"
+              ]
+            },
+            "client": {
+              "type": "object"
+            },
+            "device": {
+              "type": "object"
+            },
+            "screen": {
+              "type": "object"
+            },
+            "capabilities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "mode": {
+              "const": "multi-session"
+            }
           },
           "allOf": [
             {
-              "if": {"properties": {"role": {"const": "host"}}},
-              "then": {"required": ["session", "client"]}
+              "if": {
+                "properties": {
+                  "role": {
+                    "const": "host"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "session",
+                  "client"
+                ]
+              }
             },
             {
-              "if": {"properties": {"role": {"const": "device"}}},
-              "then": {"required": ["reply_to", "device", "screen", "capabilities"]}
+              "if": {
+                "properties": {
+                  "role": {
+                    "const": "device"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "reply_to",
+                  "device",
+                  "screen",
+                  "capabilities"
+                ]
+              }
             }
           ]
         }
@@ -32,42 +82,87 @@
     },
     "ack": {
       "allOf": [
-        {"$ref": "envelope.schema.json"},
+        {
+          "$ref": "envelope.schema.json"
+        },
         {
           "type": "object",
-          "required": ["id", "reply_to", "ok"],
+          "required": [
+            "id",
+            "reply_to",
+            "ok"
+          ],
           "properties": {
-            "type": {"const": "ack"},
-            "ok": {"type": "boolean"},
-            "applied": {"type": "boolean"},
-            "last_seq": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+            "type": {
+              "const": "ack"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "applied": {
+              "type": "boolean"
+            },
+            "last_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "committed": {
+              "type": "boolean"
+            }
           }
         }
       ]
     },
     "ping": {
       "allOf": [
-        {"$ref": "envelope.schema.json"},
+        {
+          "$ref": "envelope.schema.json"
+        },
         {
           "type": "object",
-          "required": ["id", "session"],
+          "required": [
+            "id",
+            "session"
+          ],
           "properties": {
-            "type": {"const": "ping"},
-            "sent_at": {"type": "integer", "minimum": 0}
+            "type": {
+              "const": "ping"
+            },
+            "sent_at": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       ]
     },
     "pong": {
       "allOf": [
-        {"$ref": "envelope.schema.json"},
+        {
+          "$ref": "envelope.schema.json"
+        },
         {
           "type": "object",
-          "required": ["id", "reply_to", "uptime_ms", "last_seq"],
+          "required": [
+            "id",
+            "reply_to",
+            "uptime_ms",
+            "last_seq"
+          ],
           "properties": {
-            "type": {"const": "pong"},
-            "uptime_ms": {"type": "integer", "minimum": 0},
-            "last_seq": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+            "type": {
+              "const": "pong"
+            },
+            "uptime_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "last_seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
             "diagnostics": {
               "type": "object",
               "required": [
@@ -80,13 +175,41 @@
                 "heartbeat_timeouts"
               ],
               "properties": {
-                "valid_frames": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "invalid_frames": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "oversized_frames": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "old_sequences": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "ui_queue_overwrites": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "tx_drops": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "heartbeat_timeouts": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+                "valid_frames": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "invalid_frames": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "oversized_frames": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "old_sequences": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "ui_queue_overwrites": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "tx_drops": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "heartbeat_timeouts": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                }
               },
               "additionalProperties": true
             },
@@ -102,21 +225,81 @@
                 "usb_stack_min_bytes"
               ],
               "properties": {
-                "heap_free_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "heap_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "internal_free_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "internal_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "app_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "ui_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "usb_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "ble_stack_min_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "ble_rx_drops": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "ble_tx_drops": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "ble_security_rejections": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "ble_pairing_rejections": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "ble_disconnects": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "transport_switches": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "transport_rejections": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+                "heap_free_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "heap_min_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "internal_free_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "internal_min_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "app_stack_min_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "ui_stack_min_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "usb_stack_min_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "ble_stack_min_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "ble_rx_drops": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "ble_tx_drops": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "ble_security_rejections": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "ble_pairing_rejections": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "ble_disconnects": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "transport_switches": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "transport_rejections": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                }
               },
               "additionalProperties": true
             }
@@ -126,36 +309,77 @@
     },
     "clear": {
       "allOf": [
-        {"$ref": "envelope.schema.json"},
+        {
+          "$ref": "envelope.schema.json"
+        },
         {
           "type": "object",
-          "required": ["id", "session", "seq"],
-          "properties": {"type": {"const": "clear"}}
+          "required": [
+            "id",
+            "session",
+            "seq"
+          ],
+          "properties": {
+            "type": {
+              "const": "clear"
+            }
+          }
         }
       ]
     },
     "error": {
       "allOf": [
-        {"$ref": "envelope.schema.json"},
+        {
+          "$ref": "envelope.schema.json"
+        },
         {
           "type": "object",
-          "required": ["id", "code", "message"],
+          "required": [
+            "id",
+            "code",
+            "message"
+          ],
           "properties": {
-            "type": {"const": "error"},
-            "code": {"type": "string", "minLength": 1},
-            "message": {"type": "string", "maxLength": 160}
+            "type": {
+              "const": "error"
+            },
+            "code": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string",
+              "maxLength": 160
+            }
           }
         }
       ]
     }
   },
   "oneOf": [
-    {"$ref": "#/$defs/hello"},
-    {"$ref": "status.schema.json"},
-    {"$ref": "#/$defs/ack"},
-    {"$ref": "#/$defs/ping"},
-    {"$ref": "#/$defs/pong"},
-    {"$ref": "#/$defs/clear"},
-    {"$ref": "#/$defs/error"}
+    {
+      "$ref": "#/$defs/hello"
+    },
+    {
+      "$ref": "status.schema.json"
+    },
+    {
+      "$ref": "#/$defs/ack"
+    },
+    {
+      "$ref": "#/$defs/ping"
+    },
+    {
+      "$ref": "#/$defs/pong"
+    },
+    {
+      "$ref": "#/$defs/clear"
+    },
+    {
+      "$ref": "#/$defs/error"
+    },
+    {
+      "$ref": "sessions.schema.json"
+    }
   ]
 }

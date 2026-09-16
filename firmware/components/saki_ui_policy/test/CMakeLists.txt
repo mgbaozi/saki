@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "test_saki_ui_policy.c"
+    SRCS "test_saki_ui_policy.c" "test_session_view.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES unity saki_ui_policy
 )

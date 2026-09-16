@@ -45,6 +45,7 @@ typedef enum {
 typedef struct {
     saki_agent_state_t state;
     bool connected;
+    bool stale;
     char transport[SAKI_TRANSPORT_CAPACITY];
     char task_id[SAKI_TASK_ID_CAPACITY];
     char task_title[SAKI_TASK_TITLE_CAPACITY];
@@ -58,6 +59,22 @@ typedef struct {
     char agent_name[SAKI_AGENT_NAME_CAPACITY];
     char model_name[SAKI_MODEL_NAME_CAPACITY];
 } saki_state_snapshot_t;
+
+#define SAKI_DISPLAY_MAX_SESSIONS 4
+
+typedef struct {
+    bool multi_session;
+    bool connected;
+    uint8_t count;
+    uint8_t total;
+    uint8_t hidden_attention;
+    uint32_t capacity_rejected;
+    char transport[SAKI_TRANSPORT_CAPACITY];
+    /* Wire order: latest submitted session first, then attention-ranked sidebar. */
+    saki_state_snapshot_t items[SAKI_DISPLAY_MAX_SESSIONS];
+    char run_ids[SAKI_DISPLAY_MAX_SESSIONS][33];
+    uint32_t revisions[SAKI_DISPLAY_MAX_SESSIONS];
+} saki_display_snapshot_t;
 
 void saki_state_snapshot_init(saki_state_snapshot_t *snapshot);
 void saki_state_snapshot_copy(

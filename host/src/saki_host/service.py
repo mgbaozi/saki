@@ -8,12 +8,15 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
+from .adapters import SourceEvent
 from .ble_binding import (
     DEFAULT_BLE_BINDING_PATH,
     BleBinding,
     BleBindingError,
     BleBindingStore,
 )
+from .display import CAPABILITY, projection
+from .identity import initialize_identity_key
 from .ipc import (
     DEFAULT_SOCKET_PATH,
     HookDatagramProtocol,
@@ -23,6 +26,7 @@ from .ipc import (
 from .models import Activity, ActivityKind, AgentState, Progress, ProgressMode, StateSnapshot
 from .protocol import ProtocolCodec
 from .protocol_session import ProtocolSession, ProtocolSessionError
+from .sessions import SessionRegistry, load_checkpoint, save_checkpoint
 from .transports.base import TransportKind
 from .transports.ble import (
     BleByteTransport,
@@ -167,6 +171,7 @@ class SnapshotTimeline:
 @dataclass(frozen=True, slots=True)
 class ServiceConfig:
     port: str | None = None
+    state_dir: Path | None = None
     transport: ServiceTransportMode = ServiceTransportMode.AUTO
     ble_binding_path: Path = DEFAULT_BLE_BINDING_PATH
     ble_scan_seconds: float = 5.0
@@ -198,6 +203,7 @@ class ActiveLink:
     identity_hint: str
     device_id: str
     port: str | None = None
+    multi_session: bool = False
 
     async def close(self) -> None:
         await self.session.close()
@@ -233,6 +239,10 @@ class SakiHostService:
         self.config = config
         self.mailbox = SnapshotMailbox(StateSnapshot(state=AgentState.IDLE))
         self.timeline = SnapshotTimeline()
+        self.registry = SessionRegistry(stale_after=config.stale_after_seconds)
+        self._source_mode = False
+        self._checkpoint_generation = -1
+        self._checkpoint_error = False
         self._codec = ProtocolCodec()
         self._binding_store = BleBindingStore(config.ble_binding_path)
         self._supervisor_lock = asyncio.Lock()
@@ -245,11 +255,57 @@ class SakiHostService:
         self._warned_ble_dependency = False
         self._warned_ble_binding = False
 
+    def accept_source_event(self, event: SourceEvent) -> None:
+        before = self.registry.generation
+        accepted = self.registry.accept(event)
+        if accepted or self.registry.generation != before:
+            self._source_mode = True
+            self.mailbox.publish(self.registry.focus())
+            self._source_emitted = (self.mailbox.generation, event.emitted_ns)
+
+    def forget_session(self, session_id: str) -> None:
+        now = time.monotonic()
+        for sid in list(self.registry.records):
+            if session_id == "all" or session_id == sid:
+                self.registry.remove(sid, now)
+        self.registry.rejected = 0
+        self.registry.generation += 1
+        self._source_mode = True
+        self.mailbox.publish(self.registry.focus(now))
+
+    async def _session_maintenance(self) -> None:
+        while True:
+            if self._source_mode and self.registry.tick():
+                self.mailbox.publish(self.registry.focus())
+            if (
+                self.config.state_dir is not None
+                and self._source_mode
+                and self._checkpoint_generation != self.registry.generation
+            ):
+                generation = self.registry.generation
+                value = self.registry.checkpoint()
+                try:
+                    await asyncio.to_thread(
+                        save_checkpoint, self.config.state_dir / "sessions.json", value
+                    )
+                except (OSError, ValueError):
+                    if not self._checkpoint_error:
+                        print(
+                            "session checkpoint unavailable; in-memory state retained", flush=True
+                        )
+                    self._checkpoint_error = True
+                else:
+                    self._checkpoint_generation = generation
+                    self._checkpoint_error = False
+            await asyncio.sleep(1.0)
+
     def accept_snapshot(
         self,
         snapshot: StateSnapshot,
         emitted_monotonic_ns: int | None = None,
     ) -> None:
+        if self._source_mode:
+            return  # Legacy unidentified IPC cannot overwrite identified sources.
         self._last_source_at = time.monotonic()
         self._source_generation += 1
         self._stale_source_generation = None
@@ -269,7 +325,7 @@ class SakiHostService:
 
     def publish_stale_if_needed(self, *, now: float | None = None) -> bool:
         """Move an abandoned active state to a truthful, generic waiting state."""
-        if self.config.stale_after_seconds <= 0:
+        if self._source_mode or self.config.stale_after_seconds <= 0:
             return False
         if self.mailbox.latest.state not in {
             AgentState.STARTING,
@@ -295,8 +351,7 @@ class SakiHostService:
         self._stale_source_generation = self._source_generation
         self.mailbox.publish(self.timeline.enrich(stale))
         print(
-            f"source stale after {self.config.stale_after_seconds:g}s; "
-            "displaying waiting_user",
+            f"source stale after {self.config.stale_after_seconds:g}s; displaying waiting_user",
             flush=True,
         )
         return True
@@ -427,6 +482,9 @@ class SakiHostService:
         try:
             await session.connect()
             hello = await session.handshake(timeout=3.0)
+            multi_session = CAPABILITY in hello.get("capabilities", [])
+            if multi_session:
+                await session.enable_multi_session()
         except BaseException:
             try:
                 await session.close()
@@ -440,6 +498,7 @@ class SakiHostService:
             identity_hint=selected_port,
             device_id=str(device["id"]),
             port=selected_port,
+            multi_session=multi_session,
         )
 
     def _load_ble_binding(self) -> BleBinding:
@@ -475,6 +534,9 @@ class SakiHostService:
                 timeout=max(3.0, self.config.ble_scan_seconds),
                 required_capabilities=_BLE_CAPABILITIES,
             )
+            multi_session = CAPABILITY in hello.get("capabilities", [])
+            if multi_session:
+                await session.enable_multi_session()
             device_id = str(hello["device"]["id"])
             if device_id != binding.device_id:
                 raise ProtocolSessionError("BLE device identity does not match verified binding")
@@ -489,6 +551,7 @@ class SakiHostService:
             kind=TransportKind.BLE,
             identity_hint=binding.identifier,
             device_id=device_id,
+            multi_session=multi_session,
         )
 
     async def _sync_link(
@@ -499,11 +562,32 @@ class SakiHostService:
         snapshot = self.mailbox.latest
         source_emitted_ns = self._take_source_emitted(current_generation)
         async with self._supervisor_lock:
-            ack = await link.session.apply_status(snapshot)
+            if link.multi_session:
+                view = projection(self.registry, time.monotonic())
+                if not self._source_mode and snapshot.task is not None:
+                    view = {
+                        "total": 1,
+                        "hidden_attention": 0,
+                        "capacity_rejected": 0,
+                        "sessions": [
+                            {
+                                "source": "legacy",
+                                "run_id": "legacy",
+                                "revision": current_generation,
+                                "fresh": True,
+                                **snapshot.to_payload(),
+                            }
+                        ],
+                    }
+                ack = await link.session.apply_projection(view)
+            else:
+                ack = await link.session.apply_status(snapshot)
         summary = (
             f"synced state={snapshot.state.value} seq={ack.get('last_seq')} "
             f"transport={link.kind} applied={ack.get('applied')}"
         )
+        if link.multi_session:
+            summary += f" sessions={len(view['sessions'])}"
         if source_emitted_ns is not None:
             source_to_ack_ms = max(
                 0.0,
@@ -534,8 +618,14 @@ class SakiHostService:
         elif self.config.transport is ServiceTransportMode.AUTO:
             usb_available = asyncio.create_task(self._wait_for_usb_availability())
 
+        last_heartbeat = time.monotonic()
         try:
             while True:
+                if time.monotonic() - last_heartbeat >= self.config.heartbeat_seconds:
+                    async with self._supervisor_lock:
+                        pong = await link.session.ping()
+                    self.observe_device_diagnostics(pong)
+                    last_heartbeat = time.monotonic()
                 update = asyncio.create_task(self.mailbox.wait_after(sent_generation))
                 watched = {update}
                 if disappeared is not None:
@@ -544,7 +634,9 @@ class SakiHostService:
                     watched.add(usb_available)
                 done, _ = await asyncio.wait(
                     watched,
-                    timeout=self.config.heartbeat_seconds,
+                    timeout=max(
+                        0, self.config.heartbeat_seconds - (time.monotonic() - last_heartbeat)
+                    ),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
 
@@ -572,6 +664,7 @@ class SakiHostService:
                     snapshot, generation = update.result()
                     del snapshot, generation
                     sent_generation = await self._sync_link(link)
+                    await asyncio.sleep(0.25)
                     continue
 
                 update.cancel()
@@ -579,10 +672,9 @@ class SakiHostService:
                 async with self._supervisor_lock:
                     pong = await link.session.ping()
                 self.observe_device_diagnostics(pong)
+                last_heartbeat = time.monotonic()
         finally:
-            tasks = [
-                task for task in (update, disappeared, usb_available) if task is not None
-            ]
+            tasks = [task for task in (update, disappeared, usb_available) if task is not None]
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -694,27 +786,42 @@ class SakiHostService:
             await asyncio.sleep(delay)
 
     async def run(self) -> None:
+        if self.config.state_dir is not None:
+            await asyncio.to_thread(initialize_identity_key, self.config.state_dir / "identity.key")
+            try:
+                recovered = await asyncio.to_thread(
+                    load_checkpoint, self.config.state_dir / "sessions.json"
+                )
+                self.registry.restore(recovered)
+                self._source_mode = True
+                self.mailbox.publish(self.registry.focus())
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError, KeyError, TypeError, RecursionError):
+                print("session recovery unavailable; waiting for source events", flush=True)
         loop = asyncio.get_running_loop()
         prepare_socket_path(self.config.socket_path)
         transport, _ = await loop.create_datagram_endpoint(
-            lambda: HookDatagramProtocol(self.accept_snapshot),
+            lambda: HookDatagramProtocol(
+                self.accept_snapshot, self.accept_source_event, self.forget_session
+            ),
             family=socket.AF_UNIX,
             local_addr=str(self.config.socket_path),
         )
         self._transport = transport
         protect_socket(self.config.socket_path)
         print(f"hook socket ready path={self.config.socket_path}", flush=True)
+        maintenance_task = asyncio.create_task(self._session_maintenance())
         connection_task = asyncio.create_task(self._connection_loop())
         stale_task = (
-            asyncio.create_task(self._stale_loop())
-            if self.config.stale_after_seconds > 0
-            else None
+            asyncio.create_task(self._stale_loop()) if self.config.stale_after_seconds > 0 else None
         )
         try:
             await connection_task
         finally:
             connection_task.cancel()
-            tasks = [connection_task]
+            maintenance_task.cancel()
+            tasks = [connection_task, maintenance_task]
             if stale_task is not None:
                 stale_task.cancel()
                 tasks.append(stale_task)

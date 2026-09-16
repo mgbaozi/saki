@@ -51,6 +51,7 @@ class ProtocolSession:
         self._receive_buffer = bytearray()
         self._request_lock = asyncio.Lock()
         self._connected = False
+        self.multi_session = False
 
     async def connect(self) -> None:
         if self._connected:
@@ -217,6 +218,28 @@ class ProtocolSession:
             raise ProtocolSessionError(
                 f"device is missing required capabilities: {', '.join(sorted(missing))}"
             )
+        return response
+
+    async def enable_multi_session(self) -> None:
+        message = self.codec.hello()
+        message["mode"] = "multi-session"
+        response = await self.request(message, "hello")
+        if response.get("mode") != "multi-session":
+            raise ProtocolSessionError("device did not select multi-session mode")
+        self.multi_session = True
+
+    async def apply_projection(self, projection: dict) -> dict:
+        from .display import encode_projection
+
+        message = encode_projection(self.codec, projection)
+        response = await self.request(message, "ack")
+        if (
+            response.get("ok") is not True
+            or type(response.get("last_seq")) is not int
+            or response["last_seq"] != message["seq"]
+            or not (response.get("applied") is True or response.get("committed") is True)
+        ):
+            raise ProtocolSessionError("display projection was not committed")
         return response
 
     async def apply_status(self, snapshot: StateSnapshot) -> dict[str, Any]:

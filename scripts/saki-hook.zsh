@@ -13,4 +13,5 @@ if [[ ! -x "$SAKI_HOOK_EXECUTABLE" ]]; then
   exit 0
 fi
 
-exec "$SAKI_HOOK_EXECUTABLE" hook "$@"
+"$SAKI_HOOK_EXECUTABLE" hook --source codex "$@" >/dev/null 2>/dev/null
+exit 0
