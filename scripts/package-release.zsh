@@ -4,7 +4,7 @@ set -euo pipefail
 
 SAKI_SCRIPT_DIR="${0:A:h}"
 SAKI_REPO_ROOT="${SAKI_SCRIPT_DIR:h}"
-SAKI_VERSION="0.4.5"
+SAKI_VERSION="0.5.0"
 SAKI_MODE="candidate"
 
 if [[ "${1:-}" == "--final" ]]; then

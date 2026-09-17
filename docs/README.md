@@ -5,24 +5,25 @@
 
 ## 当前稳定版本
 
-0.4.5 已正式发布，支持 Codex / Claude Code 多来源、多 Session、最新提交主屏、状态侧栏，
-以及未开始空闲会话的显示筛选。版本范围和发布记录以发布说明及冻结任务记录为准。
+0.5.0 已正式发布，在 Codex / Claude Code 多 Session 基线上加入注册表式 adapter、通用来源
+标签、设备端素材包、状态文案和更清晰的最近会话生命周期。版本范围和发布记录以发布说明及
+冻结任务记录为准。
+
+- [0.5.0 产品规格](./versions/0.5.0/SPEC.md)
+- [0.5.0 工程实施](./versions/0.5.0/IMPLEMENTATION.md)
+- [0.5.0 实施任务与验证记录](./versions/0.5.0/TASKS.md)
+- [0.5.0 用户指南](./versions/0.5.0/USER_GUIDE.md)
+- [0.5.0 发布说明](./releases/0.5.0.md)
+
+## 上一稳定版本
+
+0.4.5 是首个多来源稳定版，保留为兼容和回退基线。
 
 - [0.4.5 产品规格](./versions/0.4.5/SPEC.md)
 - [0.4.5 工程实施](./versions/0.4.5/IMPLEMENTATION.md)
 - [0.4.5 实施任务与验证记录](./versions/0.4.5/TASKS.md)
 - [0.4.5 用户指南](./versions/0.4.5/USER_GUIDE.md)
 - [0.4.5 发布说明](./releases/0.4.5.md)
-
-## 下一版本规划
-
-0.5.0 聚焦可扩展 Agent adapter、通用来源标签和设备视觉体验；当前正在实施，进度与验证证据
-只在版本任务清单维护。
-
-- [0.5.0 产品规格](./versions/0.5.0/SPEC.md)
-- [0.5.0 工程实施计划](./versions/0.5.0/IMPLEMENTATION.md)
-- [0.5.0 实施任务与验证计划](./versions/0.5.0/TASKS.md)
-- [0.5.0 用户指南草案](./versions/0.5.0/USER_GUIDE.md)
 
 ## 多 Session 开发基线
 

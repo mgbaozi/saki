@@ -17,7 +17,7 @@ scripts/build-firmware-profile.zsh release
 
 The profiles generate independent `firmware/build-dev/sdkconfig` and
 `firmware/build-release/sdkconfig` files. The developer image reports
-`0.4.5-dev`; the formal 0.4.5 release profile reports `0.4.5`. Do not run
+`0.5.0-dev`; the formal 0.5.0 release profile reports `0.5.0`. Do not run
 `idf.py set-target`: the reviewed ESP32-S3 board configuration is loaded from
 `config/sdkconfig.vendor`.
 
@@ -48,13 +48,11 @@ scripts/run-firmware-tests.zsh /dev/cu.usbmodemXXXXXX
 The test runner uses USB Serial/JTAG as its primary console. Press `*` in the Unity
 menu to repeat all tests and `Ctrl-]` to leave the monitor.
 
-## 0.4.5 multi-session firmware
+## 0.5.0 extensible-source and theme firmware
 
 A negotiated `multi-session` mode accepts complete, bounded four-item display
-sets. The parser validates a peer-owned candidate before transport arbitration
-and one UI queue copy. Legacy hello/status/clear retain their single-task mode.
-The main view follows the latest user submission, with up to three colored status
-entries in a right sidebar. Tapping an entry temporarily opens it; new submissions
-or a 15-second timeout return to the default main view. See the
-[0.4.5 task record](../docs/versions/0.4.5/TASKS.md) for the verification performed before release
-and the remaining hardware coverage.
+sets. The additional `generic-source` capability displays validated Agent labels
+without product-specific firmware branches while retaining the 0.4.5 downgrade
+path. Device-side theme packs map semantic states to static art and optional copy;
+the protocol never carries character assets. See the
+[0.5.0 task record](../docs/versions/0.5.0/TASKS.md) for the frozen release evidence.

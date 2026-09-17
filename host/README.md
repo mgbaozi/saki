@@ -13,7 +13,7 @@ scripts/check.zsh
 host/.venv/bin/saki-host demo
 ```
 
-The package version is `0.4.5`. USB remains available without
+The package version is `0.5.0`. USB remains available without
 Bluetooth dependencies. For BLE development on macOS, install the optional
 extra and complete first pairing in the foreground:
 
@@ -47,7 +47,7 @@ session owns USB/BLE discovery, handshaking, ACK/retry, heartbeat, transport
 priority and reconnection. `serve --transport auto` prefers USB and only uses a
 previously verified BLE binding as fallback.
 
-## Multiple coding agents and sessions (0.4.5)
+## Extensible adapters and multiple sessions (0.5.0)
 
 Codex and Claude Code adapters normalize allowlisted lifecycle metadata, filtered goals and
 HMAC identities. The registry keeps at most 32 sessions and projects a stable
@@ -65,10 +65,10 @@ and is sent to the device as task.title. The raw hook object and a separate full
 prompt field are not persisted or forwarded. Transcripts, tool arguments/results
 and model replies are not used to derive goals. Normal service sync logs omit goal
 text; explicit `hook --stdout` diagnostics include it. See the
-[0.4.5 privacy contract](../docs/versions/0.4.5/SPEC.md#4-安装隐私与失败隔离).
+[0.5.0 privacy guidance](../docs/versions/0.5.0/USER_GUIDE.md#隐私与安全).
 
 Use `saki-host hooks install|check|uninstall --source claude_code` (or `codex`),
 choosing user or explicit project scope once. `saki-host sessions list` reads the
 latest checkpoint; `sessions forget <id|all>` requests display-only cleanup.
-See the [0.4.5 guide](../docs/versions/0.4.5/USER_GUIDE.md) for configuration preservation,
+See the [0.5.0 guide](../docs/versions/0.5.0/USER_GUIDE.md) for configuration preservation,
 source limitations and troubleshooting.

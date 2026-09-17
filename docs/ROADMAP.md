@@ -13,7 +13,7 @@
 | 0.3.0 基线 | 安全 BLE fallback | USB 优先、BLE 绑定与双传输仲裁；已并入 0.4.5 | [版本文档](./versions/0.3.0/SPEC.md) |
 | 0.4.0 基线 | 多 Agent / 多 Session | Codex / Claude Code 多任务页面与完整集合协议；未单独发布，已并入 0.4.5 | [版本文档](./versions/0.4.0/SPEC.md) |
 | 0.4.5 | 首个多来源稳定版 | 多来源、多 Session、安装流程与空闲会话筛选 | [发布说明](./releases/0.4.5.md) |
-| 0.5.0 | 可扩展 Agent 接入与视觉体验 | 注册表式 adapter、通用来源标签、图片化状态与可控趣味文案 | [版本规格](./versions/0.5.0/SPEC.md) |
+| 0.5.0 | 可扩展 Agent 接入与视觉体验 | 注册表式 adapter、通用来源标签、图片化状态与可控趣味文案 | [发布说明](./releases/0.5.0.md) |
 | 1.0 | 稳定硬件基线 | 汇总并关闭完整真机、交互、传输恢复与资源门槛 | 本文件“1.0 发布前真机门槛” |
 | 1.1+ 候选 | Wi-Fi | 局域网传输、配网与三传输仲裁 | 尚未排期 |
 
@@ -22,10 +22,9 @@
 
 ## 0.5.0：可扩展 Agent 接入与视觉体验
 
-0.5 已展开为[版本规格](./versions/0.5.0/SPEC.md)、
-[工程实施计划](./versions/0.5.0/IMPLEMENTATION.md)、
-[任务清单](./versions/0.5.0/TASKS.md)和[用户指南草案](./versions/0.5.0/USER_GUIDE.md)。
-详细契约与任务只在版本目录维护。
+0.5 已正式发布；冻结的[版本规格](./versions/0.5.0/SPEC.md)、
+[工程实施](./versions/0.5.0/IMPLEMENTATION.md)、[任务记录](./versions/0.5.0/TASKS.md)、
+[用户指南](./versions/0.5.0/USER_GUIDE.md)和[发布说明](./releases/0.5.0.md)保留实际范围与证据。
 
 本版先把 Codex / Claude Code 的来源分支收敛为显式 `AdapterSpec` 注册表，并通过能力协商让
 新固件接受有界通用来源标签；旧固件对未来来源安全降级为 `legacy / Agent`。随后在同一通用

@@ -4,7 +4,7 @@ Saki 是一块放在桌面上的 AI Agent 状态屏。它由 ESP32-S3 设备和 
 把 Codex 和 Claude Code 的工作状态同步到独立屏幕，让你不切换窗口也能知道任务正在运行、
 等待操作，还是已经结束。
 
-当前稳定版本为 [0.4.5](https://github.com/mgbaozi/saki/releases/tag/v0.4.5)。目标硬件为
+当前稳定版本为 [0.5.0](https://github.com/mgbaozi/saki/releases/tag/v0.5.0)。目标硬件为
 正点原子 ATK-DNESP32S3B3 / ESP32S3 BOX3，16 MiB Flash、8 MiB Octal PSRAM、320×240 横屏。
 
 ## 实机效果
@@ -21,17 +21,17 @@ Saki 是一块放在桌面上的 AI Agent 状态屏。它由 ESP32-S3 设备和 
 
 ## Quick Start
 
-以下流程使用已经发布的 0.4.5 release 固件，不需要安装 ESP-IDF，也不需要先构建固件。
+以下流程使用已经发布的 0.5.0 release 固件，不需要安装 ESP-IDF，也不需要先构建固件。
 需要 macOS、Python 3.12、目标开发板和一根支持数据传输的 USB 线。
 
 ### 1. 下载并校验 release 固件
 
 ```zsh
-curl -LO https://github.com/mgbaozi/saki/releases/download/v0.4.5/saki-0.4.5.zip
-curl -LO https://github.com/mgbaozi/saki/releases/download/v0.4.5/saki-0.4.5.zip.sha256
-shasum -a 256 -c saki-0.4.5.zip.sha256
-unzip saki-0.4.5.zip
-cd saki-0.4.5
+curl -LO https://github.com/mgbaozi/saki/releases/download/v0.5.0/saki-0.5.0.zip
+curl -LO https://github.com/mgbaozi/saki/releases/download/v0.5.0/saki-0.5.0.zip.sha256
+shasum -a 256 -c saki-0.5.0.zip.sha256
+unzip saki-0.5.0.zip
+cd saki-0.5.0
 ```
 
 ### 2. 烧录设备
@@ -54,7 +54,7 @@ find /dev -maxdepth 1 -name 'cu.usb*' -print
 ```zsh
 .venv/bin/python -m esptool --chip esp32s3 \
   --port /dev/cu.usbmodemXXXXXX --baud 460800 \
-  write_flash 0x0 saki-0.4.5-full.bin
+  write_flash 0x0 saki-0.5.0-full.bin
 ```
 
 烧录完成后，不按 `K0`，短按一次 `RST` 启动应用。端口名会随重新枚举变化，每次操作都应
@@ -65,7 +65,7 @@ find /dev -maxdepth 1 -name 'cu.usb*' -print
 回到准备存放源码的目录，安装 USB 模式所需的 Host：
 
 ```zsh
-git clone --branch v0.4.5 --depth 1 https://github.com/mgbaozi/saki.git
+git clone --branch v0.5.0 --depth 1 https://github.com/mgbaozi/saki.git
 cd saki
 python3.12 -m venv host/.venv
 host/.venv/bin/pip install -e host
@@ -94,7 +94,7 @@ scripts/saki-service.zsh status
 ```
 
 重新打开 Codex 或 Claude Code 会话并提交一个任务，状态就会同步到屏幕。hook 的作用域、
-卸载和故障排查见 [0.4.5 用户指南](./docs/versions/0.4.5/USER_GUIDE.md)；BLE 配对与诊断见
+卸载和故障排查见 [0.5.0 用户指南](./docs/versions/0.5.0/USER_GUIDE.md)；BLE 配对与诊断见
 [Host 开发说明](./host/README.md)。
 
 ## 工作方式
@@ -171,11 +171,11 @@ host/.venv/bin/saki-host sessions forget all
 ## 文档
 
 - [文档索引](./docs/README.md)
-- [0.4.5 产品规格](./docs/versions/0.4.5/SPEC.md)
-- [0.4.5 工程实施](./docs/versions/0.4.5/IMPLEMENTATION.md)
-- [0.4.5 验证记录](./docs/versions/0.4.5/TASKS.md)
-- [0.4.5 用户指南](./docs/versions/0.4.5/USER_GUIDE.md)
-- [0.4.5 发布说明](./docs/releases/0.4.5.md)
+- [0.5.0 产品规格](./docs/versions/0.5.0/SPEC.md)
+- [0.5.0 工程实施](./docs/versions/0.5.0/IMPLEMENTATION.md)
+- [0.5.0 验证记录](./docs/versions/0.5.0/TASKS.md)
+- [0.5.0 用户指南](./docs/versions/0.5.0/USER_GUIDE.md)
+- [0.5.0 发布说明](./docs/releases/0.5.0.md)
 - [后续路线图](./docs/ROADMAP.md)
 
 ## 许可证与项目名称

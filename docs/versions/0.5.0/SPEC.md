@@ -1,8 +1,8 @@
 # Saki 0.5.0 可扩展 Agent 接入与视觉体验规格
 
-> 状态：实施中；更新：2026-09-17。
-> [工程实施计划](./IMPLEMENTATION.md) · [任务与验证计划](./TASKS.md) ·
-> [用户指南草案](./USER_GUIDE.md)
+> 状态：已发布；更新：2026-09-17。
+> [工程实施记录](./IMPLEMENTATION.md) · [任务与验证记录](./TASKS.md) ·
+> [用户指南](./USER_GUIDE.md)
 
 ## 1. 目标与基线
 

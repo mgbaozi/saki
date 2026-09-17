@@ -1,13 +1,24 @@
-# Saki 0.5.0 用户指南草案
+# Saki 0.5.0 用户指南
 
-> 0.5.0 正在开发，本文描述已冻结的预期用户行为，不是当前安装说明。当前稳定版请使用
-> 根目录 README 和 [0.4.5 用户指南](../0.4.5/USER_GUIDE.md)。
+> 本文适用于已发布的 0.5.0。首次安装和 release 固件烧录从根目录
+> [Quick Start](../../../README.md#quick-start) 开始。
 
-## 升级预期
+## 从 0.4.5 升级
 
-0.5 计划保持现有 Codex / Claude Code hook、Mac Host 服务、USB 优先和已绑定 BLE fallback
-配置。正常升级不应要求重新生成身份密钥、清理 Session 或重新安装 hook；若实现阶段发现
-必须迁移，会在发布前提供显式、可恢复步骤，不能静默重置身份。
+0.5 保持现有 Codex / Claude Code hook、Mac Host 服务、USB 优先、身份密钥和已绑定 BLE
+fallback 配置。先按 Quick Start 下载并刷入 0.5.0 release 固件，再在已有源码目录更新 Host：
+
+```zsh
+git fetch --tags
+git checkout v0.5.0
+host/.venv/bin/pip install -e host
+host/.venv/bin/saki-host hooks check --source codex
+host/.venv/bin/saki-host hooks check --source claude_code
+scripts/saki-service.zsh restart
+```
+
+只使用其中一个 Agent 时可以省略另一项检查。正常升级不需要清理 Session、重新生成身份密钥
+或重新安装 hook；`hooks check` 报告缺失时才运行对应的 `hooks install`。
 
 0.5 的 adapter 注册表是项目内部扩展边界，不是面向用户的任意插件系统。发布初期仍只承诺
 Codex 和 Claude Code；看到通用来源标签或 `generic-source` capability 不代表可以把未知
@@ -22,7 +33,7 @@ Codex 和 Claude Code；看到通用来源标签或 `generic-source` capability 
 | 0.4.5 Host + 0.5 firmware | 固件兼容既有多 Session，不要求 Host 理解新 capability |
 
 Host 与固件版本不同不应擦除配置。遇到未知来源时，兼容模式宁可显示通用 `Agent`，也不能
-发送旧固件无法解析的整组消息。正式发布前会补充可直接执行的升级、回退和版本检查命令。
+发送旧固件无法解析的整组消息。
 
 ## 通用来源显示
 
@@ -76,18 +87,20 @@ ID；来源名称只用于识别，不参与 Session 身份。Session 仍以本�
 
 0.5 不扩大数据采集范围。Adapter 只提取允许的身份、事件、工具类别和短目标；完整 prompt、
 原始 hook、工具参数/结果、transcript 和模型回复不进入检查点或设备。短目标仍可能包含用户
-请求原文片段，规则过滤不是完整匿名化，使用敏感任务时应按 0.4.5 指南评估屏幕可见内容。
+请求原文片段，规则过滤不是完整匿名化，使用敏感任务时应评估屏幕可见内容。
 
 通用 adapter 注册表是随 Saki 安装的显式代码，不扫描用户目录或加载远程 adapter。未知来源
 和非法 source key 会被拒绝，不根据工具名或 payload 猜测产品。
 
-## 规划期排障边界
+## 故障排查与回退
 
-在 0.5 正式发布前：
+状态没有更新时依次检查：
 
-- 不使用本草案中的 capability 名称判断本机固件已经支持通用来源；
-- 不手工修改 protocol source 伪造第三方 Agent；旧固件会拒绝未知 source；
-- 不把开发构建的图片或生成 C 文件复制进 release 固件目录；
-- 当前 Codex / Claude Code 问题继续按 0.4.5 指南排查。
+- `scripts/saki-service.zsh status` 确认 Host 正在运行；
+- `saki-host hooks check --source <codex|claude_code>` 确认 wrapper、身份和配置完整；
+- `saki-host sessions list` 只查看脱敏检查点，过期显示项可用 `sessions forget <id>` 清理；
+- 独占 USB 的 `doctor` 前先停止服务，完成后重新启动，避免两个 Host 同时占用串口。
 
-正式版指南将补充版本检查、升级/回退、视觉设置、兼容降级识别和资源故障恢复步骤。
+需要回退时重新下载并烧录 v0.4.5 release 包，然后将源码切到 `v0.4.5` 并重新安装 Host。
+回退不会自动删除 0.5 的私有检查点或身份密钥；若旧 Host 无法解释新记录，可使用当前 0.5
+CLI 的 `sessions forget all` 先清理显示记录。不要手工修改 protocol source 伪造第三方 Agent。
