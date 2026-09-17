@@ -11,7 +11,7 @@ scripts/build-firmware.zsh
 # Explicit equivalent:
 scripts/build-firmware-profile.zsh dev
 
-# Release candidate only:
+# Build the published release profile from source:
 scripts/build-firmware-profile.zsh release
 ```
 
@@ -48,13 +48,13 @@ scripts/run-firmware-tests.zsh /dev/cu.usbmodemXXXXXX
 The test runner uses USB Serial/JTAG as its primary console. Press `*` in the Unity
 menu to repeat all tests and `Ctrl-]` to leave the monitor.
 
-## 0.4 multi-session development
+## 0.4.5 multi-session firmware
 
 A negotiated `multi-session` mode accepts complete, bounded four-item display
 sets. The parser validates a peer-owned candidate before transport arbitration
 and one UI queue copy. Legacy hello/status/clear retain their single-task mode.
 The main view follows the latest user submission, with up to three colored status
 entries in a right sidebar. Tapping an entry temporarily opens it; new submissions
-or a 15-second timeout return to the default main view. Offline contracts and dev/release/Unity builds
-pass; display, touch, transport switching and runtime memory still require target
-hardware validation. See [0.4 TASKS](../docs/versions/0.4.0/TASKS.md).
+or a 15-second timeout return to the default main view. See the
+[0.4.5 task record](../docs/versions/0.4.5/TASKS.md) for the verification performed before release
+and the remaining hardware coverage.
