@@ -86,6 +86,34 @@ class ProtocolSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ProtocolSessionError, "ble"):
             await session.handshake(required_capabilities=frozenset({"ble"}))
 
+    async def test_generic_source_activates_only_after_multi_session_handshake(self) -> None:
+        transport = FakeAsyncTransport()
+        session = ProtocolSession(
+            transport,
+            ProtocolCodec("00000000-0000-4000-8000-000000000001"),
+            retry_count=0,
+        )
+        await session.connect()
+        hello = {
+            "v": 1,
+            "type": "hello",
+            "id": 7,
+            "role": "device",
+            "device": {"id": "0123456789ab"},
+            "screen": {"width": 320, "height": 240},
+            "capabilities": ["status", "multi-session", "generic-source"],
+        }
+        await transport.respond({**hello, "reply_to": 1})
+        await session.handshake()
+        self.assertFalse(session.generic_source)
+
+        await transport.respond({**hello, "reply_to": 2, "mode": "multi-session"})
+        await session.enable_multi_session()
+
+        self.assertTrue(session.multi_session)
+        self.assertTrue(session.generic_source)
+        self.assertIn("generic-source", session.capabilities)
+
     async def test_retry_reuses_exact_frame(self) -> None:
         transport = FakeAsyncTransport()
         session = ProtocolSession(transport, response_timeout=0.01, retry_count=1)

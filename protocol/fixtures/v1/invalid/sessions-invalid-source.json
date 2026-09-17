@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "type": "sessions",
+  "id": 1,
+  "session": "00000000-0000-4000-8000-000000000001",
+  "seq": 1,
+  "total": 1,
+  "hidden_attention": 0,
+  "capacity_rejected": 0,
+  "sessions": [
+    {
+      "source": "Demo-Agent",
+      "run_id": "local-1",
+      "revision": 1,
+      "fresh": true,
+      "state": "working",
+      "agent": {
+        "name": "Demo Agent"
+      },
+      "task": {
+        "id": "0123456789abcdef0123456789abcdef",
+        "title": "非法来源键"
+      }
+    }
+  ]
+}

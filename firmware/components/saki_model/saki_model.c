@@ -13,6 +13,7 @@ void saki_state_snapshot_init(saki_state_snapshot_t *snapshot)
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->state = SAKI_AGENT_IDLE;
     snapshot->progress_mode = SAKI_PROGRESS_NONE;
+    snprintf(snapshot->activity_kind, sizeof(snapshot->activity_kind), "%s", "other");
     snprintf(snapshot->agent_name, sizeof(snapshot->agent_name), "%s", "Agent");
     snprintf(snapshot->transport, sizeof(snapshot->transport), "%s", "OFFLINE");
 }

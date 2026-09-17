@@ -21,7 +21,7 @@
 #include "lcd.h"
 #include "lcdfont.h"
 
-DRAM_ATTR uint8_t refresh_done_flag = 0;    
+DRAM_ATTR volatile uint8_t refresh_done_flag = 0;    
 esp_lcd_panel_handle_t panel_handle = NULL;
 lcd_obj_t lcddev;
 
@@ -36,9 +36,32 @@ uint16_t lcd_height = 240;       /* 屏幕的宽度 240(横屏) */
 
 static bool notify_lcd_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
-    bool temp = (void *)user_ctx;
+    (void)panel_io;
+    (void)edata;
+    (void)user_ctx;
     refresh_done_flag = 1;
     return false;
+}
+
+void lcd_refresh_begin(void)
+{
+    refresh_done_flag = 0;
+}
+
+bool lcd_refresh_wait(uint32_t timeout_ms)
+{
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+
+    while (refresh_done_flag != 1)
+    {
+        if (timeout_ms == 0 || xTaskGetTickCount() - started >= timeout)
+        {
+            return false;
+        }
+        vTaskDelay(1);
+    }
+    return true;
 }
 
 /**

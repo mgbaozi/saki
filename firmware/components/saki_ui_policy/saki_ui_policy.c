@@ -1,7 +1,56 @@
 #include "saki_ui_policy.h"
 
-#include <string.h>
 #include <stdio.h>
+#include <string.h>
+
+static bool saki_ui_append(char *buffer, size_t capacity, size_t *length, const char *text)
+{
+    int written;
+
+    if (*length >= capacity) return false;
+    written = snprintf(buffer + *length, capacity - *length, "%s", text);
+    if (written < 0 || (size_t)written >= capacity - *length) {
+        buffer[capacity - 1] = '\0';
+        return false;
+    }
+    *length += (size_t)written;
+    return true;
+}
+
+bool saki_ui_format_footer(char *buffer,
+    size_t capacity,
+    bool browsing,
+    uint8_t count,
+    uint8_t total,
+    uint8_t hidden_attention,
+    bool capacity_rejected)
+{
+    int written;
+    size_t length;
+    char suffix[32];
+
+    if (buffer == NULL || capacity == 0 || count > total || hidden_attention > total - count) {
+        return false;
+    }
+    written = snprintf(buffer, capacity, "%s %u/%u",
+        browsing ? "查看 / 顶栏返回" : "最近会话", count, total);
+    if (written < 0 || (size_t)written >= capacity) {
+        buffer[capacity - 1] = '\0';
+        return false;
+    }
+    length = (size_t)written;
+    if (hidden_attention > 0) {
+        written = snprintf(suffix, sizeof(suffix), " / 待处理 %u", hidden_attention);
+        if (written < 0 || (size_t)written >= sizeof(suffix) ||
+            !saki_ui_append(buffer, capacity, &length, suffix)) {
+            return false;
+        }
+    }
+    if (capacity_rejected && !saki_ui_append(buffer, capacity, &length, " / 容量已满")) {
+        return false;
+    }
+    return true;
+}
 
 int saki_session_view_update(saki_session_view_t *view,
     const saki_display_snapshot_t *display, uint64_t now_ms)

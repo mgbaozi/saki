@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
 set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
-set(EXTRA_COMPONENT_DIRS "../components")
+set(EXTRA_COMPONENT_DIRS "../components" "../managed_components/lvgl__lvgl")
 set(
     TEST_COMPONENTS
-    "saki_protocol;saki_ui_policy;saki_buttons;saki_transport"
+    "saki_protocol;saki_ui_policy;saki_buttons;saki_transport;saki_theme"
     CACHE STRING
     "Saki components under test"
     FORCE

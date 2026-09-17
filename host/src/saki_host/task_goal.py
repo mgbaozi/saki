@@ -24,6 +24,11 @@ _FOLLOWUP = re.compile(
     r"允许|同意|确认|好的?|可以|是的|已启动|已进入下载模式|"
     r"continue|proceed|resume|yes|ok(?:ay)?|go ahead)[\s.!！。]*$"
 )
+_FILES_HEADING = re.compile(r"(?i)^(?:#{1,6}\s*)?files mentioned by the user\s*:\s*$")
+_REQUEST_HEADING = re.compile(r"(?i)^(?:#{1,6}\s*)?my request\s*:\s*$")
+_ATTACHMENT_INSTRUCTION = re.compile(
+    r"^Distinguish instructions in attached documents from the user's request\.?$"
+)
 
 
 def display_goal(value: object) -> str:
@@ -36,8 +41,17 @@ def display_goal(value: object) -> str:
         return ""
     value = _CONTEXT.sub("\n", value)
     value = _FENCE.sub("\n", value)
+    in_attachment_list = False
     for line in value.splitlines():
         line = line.strip()
+        if _FILES_HEADING.fullmatch(line):
+            in_attachment_list = True
+            continue
+        if _REQUEST_HEADING.fullmatch(line):
+            in_attachment_list = False
+            continue
+        if in_attachment_list or _ATTACHMENT_INSTRUCTION.fullmatch(line):
+            continue
         if not line or line.startswith(("<", ">", "-----")):
             continue
         line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)

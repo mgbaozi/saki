@@ -18,6 +18,7 @@
 #include "myiic.h"
 #include "saki_button_policy.h"
 #include "saki_font_cjk_16.h"
+#include "saki_theme.h"
 #include "saki_ui_policy.h"
 #include "touch.h"
 
@@ -56,21 +57,28 @@ static saki_display_snapshot_t s_current_display;
 #define SAKI_SIDEBAR_TOP 28
 #define SAKI_SIDEBAR_ROW_HEIGHT 62
 #define SAKI_SIDEBAR_COUNT (SAKI_DISPLAY_MAX_SESSIONS - 1)
+#define SAKI_COMPACT_CONTENT_RIGHT 232
+#define SAKI_COMPACT_ELAPSED_WIDTH 56
+#define SAKI_COMPACT_HEADER_GAP 6
 static bool s_sidebar_dirty = true;
 static int s_selected_session;
 static saki_session_view_t s_session_view;
 static lv_obj_t *s_sidebar;
 static lv_obj_t *s_sidebar_rows[SAKI_SIDEBAR_COUNT];
-static lv_obj_t *s_sidebar_labels[SAKI_SIDEBAR_COUNT];
+static lv_obj_t *s_sidebar_agent_labels[SAKI_SIDEBAR_COUNT];
+static lv_obj_t *s_sidebar_detail_labels[SAKI_SIDEBAR_COUNT];
 static lv_obj_t *s_sidebar_marks[SAKI_SIDEBAR_COUNT];
 static int s_sidebar_indices[SAKI_SIDEBAR_COUNT];
 
 static saki_ui_policy_t s_policy;
 static saki_button_policy_t s_button_policy;
+static saki_button_policy_t s_theme_button_policy;
 static saki_ui_button_fn s_button_callback;
 static void *s_button_context;
 
 static lv_obj_t *s_status_dot;
+static lv_obj_t *s_status_plate;
+static lv_obj_t *s_status_art;
 static lv_obj_t *s_agent_label;
 static lv_obj_t *s_transport_label;
 static lv_obj_t *s_status_label;
@@ -97,6 +105,13 @@ static lv_disp_draw_buf_t s_display_buffer;
 static lv_disp_drv_t s_display_driver;
 static lv_font_t s_font_14;
 static lv_font_t s_font_16;
+static const saki_theme_pack_t *s_theme;
+static saki_theme_copy_mode_t s_theme_copy_mode = SAKI_THEME_COPY_LIGHT;
+static bool s_art_key_valid;
+static saki_agent_state_t s_art_state;
+static char s_art_task_id[SAKI_TASK_ID_CAPACITY];
+static char s_art_run_id[33];
+static const saki_theme_pack_t *s_art_theme;
 
 static void saki_handle_tap(lv_coord_t x, lv_coord_t y);
 
@@ -134,6 +149,7 @@ static void saki_display_flush(
 )
 {
     esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)driver->user_data;
+    esp_err_t result;
     int32_t width = area->x2 - area->x1 + 1;
     int32_t height = area->y2 - area->y1 + 1;
 
@@ -142,7 +158,8 @@ static void saki_display_flush(
         color_map[index].full = (color << 8) | (color >> 8);
     }
 
-    esp_lcd_panel_draw_bitmap(
+    lcd_refresh_begin();
+    result = esp_lcd_panel_draw_bitmap(
         panel,
         area->x1,
         area->y1,
@@ -150,6 +167,11 @@ static void saki_display_flush(
         area->y2 + 1,
         color_map
     );
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "LCD flush failed: %s", esp_err_to_name(result));
+    } else if (!lcd_refresh_wait(100)) {
+        ESP_LOGE(TAG, "LCD flush timed out");
+    }
     lv_disp_flush_ready(driver);
 }
 
@@ -284,7 +306,9 @@ static void saki_create_screen(void)
     s_agent_label = lv_label_create(header);
     saki_label_base(s_agent_label, lv_color_hex(0xE2E8F0));
     lv_label_set_text(s_agent_label, "Agent");
-    lv_obj_set_pos(s_agent_label, 12, 7);
+    lv_obj_set_pos(s_agent_label, 12, 4);
+    lv_obj_set_size(s_agent_label, 190, 20);
+    lv_label_set_long_mode(s_agent_label, LV_LABEL_LONG_DOT);
 
     s_transport_label = lv_label_create(header);
     saki_label_base(s_transport_label, lv_color_hex(0x93C5FD));
@@ -297,6 +321,23 @@ static void saki_create_screen(void)
     lv_obj_set_style_radius(s_status_dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(s_status_dot, 0, 0);
     lv_obj_clear_flag(s_status_dot, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_status_plate = lv_obj_create(screen);
+    lv_obj_set_pos(s_status_plate, 8, 33);
+    lv_obj_set_size(s_status_plate, 52, 52);
+    lv_obj_set_style_radius(s_status_plate, 12, 0);
+    lv_obj_set_style_border_width(s_status_plate, 1, 0);
+    lv_obj_set_style_bg_opa(s_status_plate, LV_OPA_COVER, 0);
+    lv_obj_set_style_shadow_spread(s_status_plate, 1, 0);
+    lv_obj_clear_flag(s_status_plate, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_status_plate, LV_OBJ_FLAG_HIDDEN);
+
+    s_status_art = lv_img_create(screen);
+    lv_obj_set_pos(s_status_art, 10, 35);
+    const lv_img_dsc_t *initial_art = saki_theme_icon(s_theme, SAKI_AGENT_IDLE);
+    if (initial_art != NULL) lv_img_set_src(s_status_art, initial_art);
+    else lv_obj_add_flag(s_status_art, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_status_art, LV_OBJ_FLAG_SCROLLABLE);
 
     s_status_label = lv_label_create(screen);
     saki_label_base(s_status_label, lv_color_hex(0xF8FAFC));
@@ -372,11 +413,16 @@ static void saki_create_screen(void)
         saki_set_plain_panel(s_sidebar_marks[i], lv_color_hex(0x64748B));
         lv_obj_set_pos(s_sidebar_marks[i], 0, 4);
         lv_obj_set_size(s_sidebar_marks[i], 3, 50);
-        s_sidebar_labels[i] = lv_label_create(s_sidebar_rows[i]);
-        saki_label_base(s_sidebar_labels[i], lv_color_hex(0xE2E8F0));
-        lv_obj_set_pos(s_sidebar_labels[i], 8, 0);
-        lv_obj_set_size(s_sidebar_labels[i], 62, 60);
-        lv_label_set_long_mode(s_sidebar_labels[i], LV_LABEL_LONG_CLIP);
+        s_sidebar_agent_labels[i] = lv_label_create(s_sidebar_rows[i]);
+        saki_label_base(s_sidebar_agent_labels[i], lv_color_hex(0xE2E8F0));
+        lv_obj_set_pos(s_sidebar_agent_labels[i], 8, 0);
+        lv_obj_set_size(s_sidebar_agent_labels[i], 62, 20);
+        lv_label_set_long_mode(s_sidebar_agent_labels[i], LV_LABEL_LONG_DOT);
+        s_sidebar_detail_labels[i] = lv_label_create(s_sidebar_rows[i]);
+        saki_label_base(s_sidebar_detail_labels[i], lv_color_hex(0xE2E8F0));
+        lv_obj_set_pos(s_sidebar_detail_labels[i], 8, 20);
+        lv_obj_set_size(s_sidebar_detail_labels[i], 62, 40);
+        lv_label_set_long_mode(s_sidebar_detail_labels[i], LV_LABEL_LONG_CLIP);
     }
     lv_obj_add_flag(s_sidebar, LV_OBJ_FLAG_HIDDEN);
 
@@ -681,12 +727,15 @@ static const char *saki_short_state(saki_agent_state_t state)
 static void saki_apply_main_layout(void)
 {
     bool compact = saki_has_sidebar();
-    lv_obj_set_pos(s_status_label, compact ? 60 : 68, 42);
-    lv_obj_set_width(s_status_label, compact ? 172 : 165);
+    lv_obj_set_pos(s_status_label, compact ? 66 : 68, 42);
+    lv_obj_set_width(s_status_label,
+        compact ? SAKI_COMPACT_CONTENT_RIGHT - SAKI_COMPACT_ELAPSED_WIDTH -
+            SAKI_COMPACT_HEADER_GAP - 66 : 165);
     lv_obj_set_size(s_status_dot, compact ? 32 : 38, compact ? 32 : 38);
-    lv_obj_set_pos(s_elapsed_label, compact ? 60 : 244, compact ? 66 : 44);
-    lv_obj_set_width(s_elapsed_label, compact ? 172 : 62);
-    lv_obj_set_style_text_align(s_elapsed_label, compact ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(s_elapsed_label,
+        compact ? SAKI_COMPACT_CONTENT_RIGHT - SAKI_COMPACT_ELAPSED_WIDTH : 244, 44);
+    lv_obj_set_width(s_elapsed_label, compact ? SAKI_COMPACT_ELAPSED_WIDTH : 62);
+    lv_obj_set_style_text_align(s_elapsed_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_width(s_title_label, compact ? 216 : 288);
     lv_obj_set_width(s_progress_bar, compact ? 164 : 238);
     lv_obj_set_pos(s_progress_label, compact ? 188 : 260, 197);
@@ -695,6 +744,8 @@ static void saki_apply_main_layout(void)
 static void saki_apply_text_view(const saki_state_snapshot_t *snapshot)
 {
     const char *summary;
+    const char *flavor;
+    const char *run_id = "";
     bool prioritize_detail;
     lv_coord_t card_width = saki_has_sidebar() ? 220 : 296;
 
@@ -705,6 +756,13 @@ static void saki_apply_text_view(const saki_state_snapshot_t *snapshot)
         (snapshot->state == SAKI_AGENT_WAITING_USER ||
          snapshot->state == SAKI_AGENT_WAITING_APPROVAL ||
          snapshot->state == SAKI_AGENT_FAILED);
+    if (s_selected_session >= 0 && s_selected_session < s_current_display.count) {
+        run_id = s_current_display.run_ids[s_selected_session];
+    }
+    flavor = snapshot->connected
+        ? saki_theme_copy(s_theme, s_theme_copy_mode, snapshot->state,
+              snapshot->task_id, run_id, snapshot->activity_kind)
+        : NULL;
 
     if (s_policy.detail_visible && snapshot->detail[0] != '\0') {
         lv_obj_add_flag(s_title_label, LV_OBJ_FLAG_HIDDEN);
@@ -723,10 +781,12 @@ static void saki_apply_text_view(const saki_state_snapshot_t *snapshot)
         s_title_label,
         snapshot->task_title[0] ? snapshot->task_title : "Waiting for a task"
     );
-    lv_label_set_text(
-        s_activity_label,
-        prioritize_detail ? snapshot->detail : summary
-    );
+    if (flavor != NULL) {
+        lv_label_set_text_fmt(s_activity_label, "%s\n%s",
+            prioritize_detail ? snapshot->detail : summary, flavor);
+    } else {
+        lv_label_set_text(s_activity_label, prioritize_detail ? snapshot->detail : summary);
+    }
 }
 
 static void saki_apply_brightness(void)
@@ -748,13 +808,55 @@ static void saki_apply_brightness(void)
 static void saki_apply_snapshot(const saki_state_snapshot_t *snapshot)
 {
     char progress[16];
+    const lv_img_dsc_t *status_art;
+    const char *run_id = "";
+    bool animate_art;
     saki_apply_main_layout();
     lv_color_t state_color = saki_state_color(snapshot);
+
+    if (s_selected_session >= 0 && s_selected_session < s_current_display.count) {
+        run_id = s_current_display.run_ids[s_selected_session];
+    }
+    animate_art = !s_art_key_valid || s_art_state != snapshot->state ||
+        s_art_theme != s_theme || strcmp(s_art_task_id, snapshot->task_id) != 0 ||
+        strcmp(s_art_run_id, run_id) != 0;
 
     lv_obj_set_style_bg_color(s_status_dot, state_color, 0);
     lv_obj_set_style_shadow_color(s_status_dot, state_color, 0);
     lv_obj_set_style_shadow_width(s_status_dot, 12, 0);
     lv_obj_set_style_shadow_opa(s_status_dot, LV_OPA_30, 0);
+    status_art = snapshot->connected ? saki_theme_icon(s_theme, snapshot->state) : NULL;
+    if (status_art != NULL) {
+        lv_color_t plate_color = lv_color_mix(
+            state_color,
+            lv_color_hex(0x111827),
+            LV_OPA_30
+        );
+        lv_obj_set_style_bg_color(s_status_plate, plate_color, 0);
+        lv_obj_set_style_border_color(s_status_plate, state_color, 0);
+        lv_obj_set_style_border_opa(s_status_plate, LV_OPA_70, 0);
+        lv_obj_set_style_shadow_color(s_status_plate, state_color, 0);
+        lv_obj_set_style_shadow_width(s_status_plate, 10, 0);
+        lv_obj_set_style_shadow_opa(s_status_plate, LV_OPA_20, 0);
+        lv_obj_clear_flag(s_status_plate, LV_OBJ_FLAG_HIDDEN);
+        lv_img_set_src(s_status_art, status_art);
+        lv_obj_clear_flag(s_status_art, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
+        if (animate_art) {
+            lv_obj_fade_in(s_status_plate, 180, 0);
+            lv_obj_fade_in(s_status_art, 180, 0);
+        }
+        s_art_key_valid = true;
+        s_art_state = snapshot->state;
+        s_art_theme = s_theme;
+        snprintf(s_art_task_id, sizeof(s_art_task_id), "%s", snapshot->task_id);
+        snprintf(s_art_run_id, sizeof(s_art_run_id), "%s", run_id);
+    } else {
+        lv_obj_add_flag(s_status_plate, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_status_art, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
+        s_art_key_valid = false;
+    }
 
     lv_label_set_text(s_agent_label, snapshot->agent_name[0] ? snapshot->agent_name : "Agent");
     lv_label_set_text(
@@ -769,7 +871,7 @@ static void saki_apply_snapshot(const saki_state_snapshot_t *snapshot)
 
     if (s_current_display.multi_session && snapshot->connected) {
         lv_label_set_text_fmt(s_status_label, "%s%s", saki_short_state(snapshot->state),
-            snapshot->stale ? " · 过期" : "");
+            snapshot->stale ? " / 过期" : "");
     }
     saki_apply_text_view(snapshot);
     lv_label_set_text(
@@ -817,6 +919,8 @@ static void saki_apply_policy_changes(uint32_t changes)
 
 static void saki_render_sidebar(void)
 {
+    char footer[80];
+
     if (!s_sidebar_dirty) return;
     s_sidebar_dirty = false;
     if (!s_current_display.multi_session) {
@@ -825,25 +929,27 @@ static void saki_render_sidebar(void)
     }
     if (saki_has_sidebar()) lv_obj_clear_flag(s_sidebar, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(s_sidebar, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text_fmt(s_model_label, "%s  %u/%u  !%u%s",
-        s_selected_session > 0 ? "查看 · 顶栏返回" : "最新提交",
-        s_current_display.count, s_current_display.total, s_current_display.hidden_attention,
-        s_current_display.capacity_rejected ? " FULL" : "");
+    if (saki_ui_format_footer(footer, sizeof(footer), s_selected_session > 0,
+            s_current_display.count, s_current_display.total,
+            s_current_display.hidden_attention, s_current_display.capacity_rejected)) {
+        lv_label_set_text(s_model_label, footer);
+    }
     if (!s_current_display.count) lv_label_set_text(s_title_label, "暂无会话");
     uint8_t row = 0;
     for (uint8_t i = 0; i < s_current_display.count; ++i) {
         if (i == s_selected_session) continue;
         const saki_state_snapshot_t *item = &s_current_display.items[i];
-        char short_id[5];
-        (void)saki_utf8_copy(short_id, sizeof(short_id), item->task_id);
-        const char *source = strcmp(item->agent_name, "Claude Code") == 0 ? "Claude" : item->agent_name;
         s_sidebar_indices[row] = i;
         lv_obj_clear_flag(s_sidebar_rows[row], LV_OBJ_FLAG_HIDDEN);
         lv_color_t color = saki_state_color(item);
         lv_obj_set_style_bg_color(s_sidebar_marks[row], color, 0);
-        lv_obj_set_style_text_color(s_sidebar_labels[row], color, 0);
-        lv_label_set_text_fmt(s_sidebar_labels[row], "%s\n%s%s\n%s", source, short_id,
-            item->stale ? "*" : "", saki_short_state(item->state));
+        lv_obj_set_style_text_color(s_sidebar_agent_labels[row], color, 0);
+        lv_obj_set_style_text_color(s_sidebar_detail_labels[row], color, 0);
+        lv_label_set_text(s_sidebar_agent_labels[row],
+            item->agent_name[0] ? item->agent_name : "Agent");
+        lv_label_set_text_fmt(s_sidebar_detail_labels[row], "%s\n%s",
+            item->stale ? "已过期" : saki_short_state(item->state),
+            item->task_title[0] ? item->task_title : "未命名会话");
         ++row;
     }
     while (row < SAKI_SIDEBAR_COUNT) {
@@ -1011,6 +1117,7 @@ static void saki_ui_task(void *argument)
     };
     lv_init();
     saki_fonts_init();
+    saki_theme_preferences_load(&s_theme, &s_theme_copy_mode);
     result = saki_display_init();
     if (result != ESP_OK) {
         goto start_failed;
@@ -1033,8 +1140,14 @@ static void saki_ui_task(void *argument)
             (button_inputs[0] & KEY_K2) != 0,
             now_ms
         );
+        saki_button_policy_init(
+            &s_theme_button_policy,
+            (button_inputs[0] & KEY_K1) != 0,
+            now_ms
+        );
     } else {
         saki_button_policy_init(&s_button_policy, false, now_ms);
+        saki_button_policy_init(&s_theme_button_policy, false, now_ms);
     }
     saki_state_snapshot_init(&s_current_snapshot);
     if (xQueueReceive(s_state_queue, &s_current_display, 0) == pdTRUE) {
@@ -1065,6 +1178,7 @@ static void saki_ui_task(void *argument)
         if (xTaskGetTickCount() - last_button_tick >=
             pdMS_TO_TICKS(SAKI_BUTTON_POLL_MS)) {
             saki_button_event_t button_event = SAKI_BUTTON_EVENT_NONE;
+            saki_button_event_t theme_event = SAKI_BUTTON_EVENT_NONE;
 
             now_ms = (uint64_t)(esp_timer_get_time() / 1000);
             if (aw9523b_read_byte(button_inputs, sizeof(button_inputs)) == ESP_OK) {
@@ -1073,8 +1187,14 @@ static void saki_ui_task(void *argument)
                     (button_inputs[0] & KEY_K2) != 0,
                     now_ms
                 );
-                if (s_button_policy.stable_pressed ||
-                    button_event != SAKI_BUTTON_EVENT_NONE) {
+                theme_event = saki_button_policy_update(
+                    &s_theme_button_policy,
+                    (button_inputs[0] & KEY_K1) != 0,
+                    now_ms
+                );
+                if (s_button_policy.stable_pressed || s_theme_button_policy.stable_pressed ||
+                    button_event != SAKI_BUTTON_EVENT_NONE ||
+                    theme_event != SAKI_BUTTON_EVENT_NONE) {
                     saki_apply_policy_changes(
                         saki_ui_policy_on_local_activity(&s_policy, now_ms)
                     );
@@ -1082,6 +1202,20 @@ static void saki_ui_task(void *argument)
                 if (button_event != SAKI_BUTTON_EVENT_NONE &&
                     s_button_callback != NULL) {
                     s_button_callback(button_event, s_button_context);
+                }
+                if (theme_event == SAKI_BUTTON_EVENT_SHORT_RELEASE) {
+                    s_theme_copy_mode = s_theme_copy_mode == SAKI_THEME_COPY_LIGHT
+                        ? SAKI_THEME_COPY_OFF : SAKI_THEME_COPY_LIGHT;
+                    if (saki_theme_preferences_save(s_theme, s_theme_copy_mode) != ESP_OK) {
+                        ESP_LOGW(TAG, "could not persist theme copy mode");
+                    }
+                    saki_apply_snapshot(&s_current_snapshot);
+                } else if (theme_event == SAKI_BUTTON_EVENT_PAIR_RELEASE) {
+                    s_theme = saki_theme_next(s_theme);
+                    if (saki_theme_preferences_save(s_theme, s_theme_copy_mode) != ESP_OK) {
+                        ESP_LOGW(TAG, "could not persist selected theme");
+                    }
+                    saki_apply_snapshot(&s_current_snapshot);
                 }
             }
             saki_ble_overlay_update_button(now_ms);

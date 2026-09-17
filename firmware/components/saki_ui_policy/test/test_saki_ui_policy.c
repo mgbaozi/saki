@@ -155,3 +155,31 @@ TEST_CASE("local button activity wakes the backlight", "[saki][ui-policy]")
     TEST_ASSERT_EQUAL_UINT8(80, policy.backlight_percent);
     TEST_ASSERT_EQUAL_UINT64(300, policy.last_activity_ms);
 }
+
+TEST_CASE("footer omits zero attention and names pending work", "[saki][ui-policy]")
+{
+    char footer[80];
+
+    TEST_ASSERT_TRUE(saki_ui_format_footer(footer, sizeof(footer), false, 2, 2, 0, false));
+    TEST_ASSERT_EQUAL_STRING("最近会话 2/2", footer);
+    TEST_ASSERT_TRUE(saki_ui_format_footer(footer, sizeof(footer), false, 2, 5, 3, false));
+    TEST_ASSERT_EQUAL_STRING("最近会话 2/5 / 待处理 3", footer);
+    TEST_ASSERT_TRUE(saki_ui_format_footer(footer, sizeof(footer), true, 2, 5, 3, false));
+    TEST_ASSERT_EQUAL_STRING("查看 / 顶栏返回 2/5 / 待处理 3", footer);
+}
+
+TEST_CASE("footer keeps capacity warning separate and bounded", "[saki][ui-policy]")
+{
+    char footer[80];
+    char short_footer[12];
+
+    TEST_ASSERT_TRUE(saki_ui_format_footer(footer, sizeof(footer), false, 4, 32, 0, true));
+    TEST_ASSERT_EQUAL_STRING("最近会话 4/32 / 容量已满", footer);
+    TEST_ASSERT_TRUE(saki_ui_format_footer(footer, sizeof(footer), false, 4, 32, 28, true));
+    TEST_ASSERT_EQUAL_STRING("最近会话 4/32 / 待处理 28 / 容量已满", footer);
+    TEST_ASSERT_FALSE(saki_ui_format_footer(
+        short_footer, sizeof(short_footer), false, 4, 32, 28, true));
+    TEST_ASSERT_EQUAL_CHAR('\0', short_footer[sizeof(short_footer) - 1]);
+    TEST_ASSERT_FALSE(saki_ui_format_footer(footer, sizeof(footer), false, 5, 4, 0, false));
+    TEST_ASSERT_FALSE(saki_ui_format_footer(footer, sizeof(footer), false, 4, 4, 1, false));
+}

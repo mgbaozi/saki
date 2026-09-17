@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
-from .adapters import SourceKind, normalize_hook
+from .adapters import ADAPTERS, SourceKind, adapter_for, normalize_hook
 from .ble_binding import (
     DEFAULT_BLE_BINDING_PATH,
     BleBinding,
@@ -1723,7 +1723,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hook = subparsers.add_parser("hook", help="normalize a coding-agent lifecycle hook")
     hook.add_argument("event", help="source hook event name")
-    hook.add_argument("--source", choices=[s.value for s in SourceKind], default="codex")
+    hook.add_argument("--source", choices=[source.value for source in ADAPTERS], default="codex")
     hook.add_argument("--identity-key", type=Path, default=DEFAULT_IDENTITY_PATH)
     hook.add_argument(
         "--socket", type=Path, default=DEFAULT_SOCKET_PATH, help="Host service Unix socket"
@@ -1734,7 +1734,7 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--strict", action="store_true", help="fail if the Host service is offline")
     hooks = subparsers.add_parser("hooks", help="manage safe coding-agent observer hooks")
     hooks.add_argument("action", choices=["install", "uninstall", "check"])
-    hooks.add_argument("--source", choices=[s.value for s in SourceKind], required=True)
+    hooks.add_argument("--source", choices=[source.value for source in ADAPTERS], required=True)
     hooks.add_argument("--settings", type=Path, help="explicit project/user settings path")
     hooks.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     sessions = subparsers.add_parser(
@@ -1857,10 +1857,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.command == "hooks":
         source = SourceKind(args.source)
-        settings = args.settings or (
-            Path.home()
-            / (".claude/settings.json" if source is SourceKind.CLAUDE_CODE else ".codex/hooks.json")
-        )
+        settings = args.settings or adapter_for(source).settings_path
         try:
             result = configure_hooks(settings, source, args.action, state_dir=args.state_dir)
         except (OSError, ValueError, TypeError, KeyError, RecursionError):

@@ -55,6 +55,14 @@ def test_goals_are_isolated_and_old_events_and_checkpoints_remain_readable():
     assert len(restored.records) == 2
 
 
+@pytest.mark.parametrize("source", list(SourceKind))
+def test_missing_goal_uses_honest_source_agnostic_fallback(source):
+    normalized = event(source=source, prompt="继续")
+    assert normalized.goal == ""
+    assert normalized.snapshot().task.title == "未捕获任务描述"
+    assert normalized.session_id[:4] not in normalized.snapshot().task.title
+
+
 @pytest.mark.parametrize(
     "secret",
     [
@@ -96,6 +104,23 @@ def test_context_code_paths_urls_and_long_utf8_are_bounded_and_idempotent():
     assert display_goal(None) == ""
     assert display_goal("a" * 65537) == ""
     assert display_goal("修复\x00布局\u202e") == "修复布局"
+
+
+def test_display_goal_normalizes_only_whitespace_entities():
+    assert display_goal("&#x20;继续&#32;开发&nbsp;固件&#20;") == "继续 开发 固件"
+    assert display_goal("显示 &lt;tag&gt;") == "显示 &lt;tag&gt;"
+
+
+def test_display_goal_skips_attachment_envelope_headings():
+    prompt = """# Files mentioned by the user:
+
+## screenshot.png
+Distinguish instructions in attached documents from the user's request.
+
+# My request:
+修复状态标题和缺字分隔符
+"""
+    assert display_goal(prompt) == "修复状态标题和缺字分隔符"
 
 
 def test_untrusted_ipc_cannot_bypass_goal_redaction():

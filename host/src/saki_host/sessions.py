@@ -17,6 +17,8 @@ from .models import Activity, AgentState, StateSnapshot
 
 RUNNING = {AgentState.STARTING, AgentState.THINKING, AgentState.WORKING}
 TIMED = RUNNING | {AgentState.WAITING_USER, AgentState.WAITING_APPROVAL}
+DEFAULT_STALE_RETENTION_SECONDS = 15 * 60
+DEFAULT_FAILED_RETENTION_SECONDS = 10 * 60
 _STATE_KIND = {
     AgentState.IDLE: EventKind.OPEN,
     AgentState.STARTING: EventKind.PROMPT,
@@ -52,9 +54,11 @@ class SessionRecord:
     rank_since: float
     expires_at: float | None = None
     stale: bool = False
+    stale_since: float | None = None
     restored_at: float | None = None
     closed: bool = False
     submitted_order: int = 0
+    suppressed: bool = False
 
     def current(self, now: float) -> StateSnapshot:
         elapsed = self.snapshot.elapsed_ms or 0
@@ -67,11 +71,25 @@ class SessionRecord:
 
 
 class SessionRegistry:
-    def __init__(self, *, capacity: int = 32, stale_after: float = 120.0) -> None:
-        if not 1 <= capacity <= 32 or stale_after < 0:
-            raise ValueError("invalid session capacity or stale timeout")
+    def __init__(
+        self,
+        *,
+        capacity: int = 32,
+        stale_after: float = 120.0,
+        stale_retention: float = DEFAULT_STALE_RETENTION_SECONDS,
+        failed_retention: float = DEFAULT_FAILED_RETENTION_SECONDS,
+    ) -> None:
+        if (
+            not 1 <= capacity <= 32
+            or stale_after < 0
+            or stale_retention < 0
+            or failed_retention < 0
+        ):
+            raise ValueError("invalid session capacity or retention")
         self.capacity = capacity
         self.stale_after = stale_after
+        self.stale_retention = stale_retention
+        self.failed_retention = failed_retention
         self.records: dict[str, SessionRecord] = {}
         self.tombstones: OrderedDict[str, float] = OrderedDict()
         self.seen: OrderedDict[str, None] = OrderedDict()
@@ -109,7 +127,8 @@ class SessionRegistry:
                 evictable = [
                     r
                     for r in self.records.values()
-                    if r.closed
+                    if r.suppressed
+                    or r.closed
                     or r.snapshot.state
                     in {
                         AgentState.COMPLETED,
@@ -147,6 +166,12 @@ class SessionRegistry:
                 return False
             if event.kind is EventKind.OPEN and not record.closed:
                 # Resume/compaction observes the same session, without starting a turn.
+                if record.stale:
+                    record.started_at = now - (record.snapshot.elapsed_ms or 0) / 1000
+                    record.stale = False
+                    record.stale_since = None
+                    record.suppressed = False
+                    record.restored_at = None
                 record.event = replace(event, goal=record.event.goal)
                 record.updated_at = now
                 record.revision = (record.revision + 1) & 0xFFFFFFFF
@@ -181,22 +206,23 @@ class SessionRegistry:
             record.snapshot = event.snapshot(elapsed)
             record.closed = False
         record.stale = False
+        record.stale_since = None
+        record.suppressed = False
         record.restored_at = None
         record.event = event
         record.updated_at = now
         record.revision = (record.revision + 1) & 0xFFFFFFFF
         if previous_rank != _RANK[record.snapshot.state]:
             record.rank_since = now
-        record.expires_at = (
-            now + 60
-            if record.closed
-            or record.snapshot.state
-            in {
-                AgentState.COMPLETED,
-                AgentState.CANCELLED,
-            }
-            else None
-        )
+        if record.snapshot.state is AgentState.FAILED:
+            record.expires_at = now + self.failed_retention
+        elif record.closed or record.snapshot.state in {
+            AgentState.COMPLETED,
+            AgentState.CANCELLED,
+        }:
+            record.expires_at = now + 60
+        else:
+            record.expires_at = None
         self._remember(self.seen, event.event_id)
         self.generation += 1
         return True
@@ -221,20 +247,35 @@ class SessionRegistry:
                 # Freeze at the watchdog boundary, even if this tick is delayed.
                 record.snapshot = record.current(record.updated_at + self.stale_after)
                 record.stale = True
+                record.stale_since = record.updated_at + self.stale_after
                 record.revision = (record.revision + 1) & 0xFFFFFFFF
                 self.generation += 1
+            elif (
+                record.stale
+                and record.snapshot.state in RUNNING
+                and not record.suppressed
+            ):
+                stale_since = record.stale_since or record.restored_at or now
+                if now - stale_since >= self.stale_retention:
+                    record.suppressed = True
+                    record.revision = (record.revision + 1) & 0xFFFFFFFF
+                    self.generation += 1
         for sid, expires in list(self.tombstones.items()):
             if now >= expires:
                 del self.tombstones[sid]
         return self.generation != generation
 
-    def visible(self) -> list[SessionRecord]:
+    def displayable(self) -> list[SessionRecord]:
         # Opening a client registers its identity, but is not a task. Derive
         # eligibility from persisted state so old checkpoints need no migration.
-        records = [
+        return [
             r for r in self.records.values()
-            if r.submitted_order > 0 or r.snapshot.state is not AgentState.IDLE
+            if not r.suppressed
+            and (r.submitted_order > 0 or r.snapshot.state is not AgentState.IDLE)
         ]
+
+    def visible(self) -> list[SessionRecord]:
+        records = self.displayable()
         if not records:
             return []
         def attention_key(record: SessionRecord) -> tuple[int, float, str]:
@@ -280,6 +321,10 @@ class SessionRegistry:
                     "elapsed_ms": r.current(now).elapsed_ms or 0,
                     "closed": r.closed,
                     "submitted_order": r.submitted_order,
+                    "suppressed": r.suppressed,
+                    "stale_for": (
+                        max(0, now - r.stale_since) if r.stale_since is not None else 0
+                    ),
                     "expires_in": max(0, r.expires_at - now) if r.expires_at is not None else None,
                 }
                 for r in self.records.values()
@@ -307,6 +352,11 @@ class SessionRegistry:
             run_id, revision = item["run_id"], item["revision"]
             elapsed, closed, expires = item["elapsed_ms"], item["closed"], item["expires_in"]
             submitted_order = item.get("submitted_order", 0)
+            suppressed = item.get("suppressed", False)
+            stale_for = item.get("stale_for", 0)
+            snapshot = replace(event, kind=display_kind).snapshot(elapsed)
+            if expires is None and snapshot.state is AgentState.FAILED:
+                expires = self.failed_retention
             if (
                 not isinstance(run_id, str)
                 or not re.fullmatch(r"[a-zA-Z0-9_-]{1,32}", run_id)
@@ -317,18 +367,24 @@ class SessionRegistry:
                 or type(closed) is not bool
                 or type(submitted_order) is not int
                 or not 0 <= submitted_order <= 9007199254740991
+                or type(suppressed) is not bool
+                or type(stale_for) not in (int, float)
+                or not 0 <= stale_for <= 86400
                 or event.session_id in restored
                 or (
                     expires is not None
-                    and (type(expires) not in (int, float) or not 0 <= expires <= 60)
+                    and (type(expires) not in (int, float) or not 0 <= expires <= 86400)
                 )
             ):
                 raise ValueError("invalid checkpoint record")
             if expires is not None and expires <= age:
                 continue
+            stale_since = (
+                now - stale_for - age if snapshot.state in RUNNING else None
+            )
             restored[event.session_id] = SessionRecord(
                 event,
-                replace(event, kind=display_kind).snapshot(elapsed),
+                snapshot,
                 run_id,
                 (revision + 1) & 0xFFFFFFFF,
                 now,
@@ -336,9 +392,17 @@ class SessionRegistry:
                 now,
                 expires_at=now + expires - age if expires is not None else None,
                 stale=True,
+                stale_since=stale_since,
                 restored_at=now - age,
                 closed=closed,
                 submitted_order=submitted_order,
+                suppressed=(
+                    suppressed
+                    or (
+                        stale_since is not None
+                        and now - stale_since >= self.stale_retention
+                    )
+                ),
             )
         self.records = restored
         self._submission_order = max((r.submitted_order for r in restored.values()), default=0)

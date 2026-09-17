@@ -47,3 +47,22 @@ Schema cannot express all byte limits, duplicate task identities or cross-field
 counts: Host/firmware tests additionally enforce them. JSON depth is bounded at
 16 and embedded/escaped NUL or trailing non-whitespace is rejected. See the
 [0.4 specification](../docs/versions/0.4.0/SPEC.md) for compatibility and recovery.
+
+## 0.5 generic source labels
+
+Devices that support product-independent source labels advertise `generic-source`
+alongside `multi-session`. The capability becomes active only after the Host's
+second hello selects `mode:"multi-session"`; a capability on a legacy status
+session does not authorize generic sources.
+
+With `generic-source`, each non-`legacy` item uses a 1–32 byte lowercase ASCII
+source key matching `^[a-z][a-z0-9_]{0,31}$`, a 32-character lowercase hexadecimal
+HMAC task ID, and a non-empty `agent.name` of at most 32 UTF-8 bytes. Firmware
+displays the supplied bounded name and does not map product keys to labels.
+`legacy` remains reserved for compatibility and displays as `Agent`.
+
+Without the capability, 0.5 Hosts keep the 0.4.5 `codex` and `claude_code` keys,
+but project any future registered source as `legacy` with the label `Agent`.
+The downgrade changes only the outgoing copy; in-memory source identity and HMAC
+task identity remain unchanged. Old firmware therefore never receives an unknown
+source that could reject the complete display set.

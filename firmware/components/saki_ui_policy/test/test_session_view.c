@@ -24,6 +24,11 @@ static int selection_contract(void)
     display.items[0].state = SAKI_AGENT_COMPLETED;
     display.revisions[0]++;
     CHECK(saki_session_view_update(&view, &display, 200) == 2);
+    /* Presentation-only changes never reset temporary browsing. */
+    strcpy(display.items[0].agent_name, "Codex");
+    strcpy(display.items[2].agent_name, "\xe6\xbc\x94\xe7\xa4\xba Agent");
+    display.hidden_attention = 1;
+    CHECK(saki_session_view_update(&view, &display, 250) == 2);
     /* Priority reorder retains the selected identity, not its old slot. */
     strcpy(display.items[1].task_id, "session-2");
     strcpy(display.items[2].task_id, "session-1");

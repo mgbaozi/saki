@@ -147,6 +147,32 @@ static bool saki_json_uint32(const cJSON *object, const char *key, uint32_t *val
     return true;
 }
 
+static bool saki_source_key_valid(const char *value)
+{
+    size_t length = 0;
+
+    if (value == NULL || value[0] < 'a' || value[0] > 'z') return false;
+    while (value[length] != '\0') {
+        char ch = value[length];
+        if (length >= 32 || !((ch >= 'a' && ch <= 'z') ||
+            (length > 0 && ch >= '0' && ch <= '9') || (length > 0 && ch == '_'))) {
+            return false;
+        }
+        ++length;
+    }
+    return length > 0;
+}
+
+static bool saki_pseudonym_valid(const char *value)
+{
+    if (value == NULL || strlen(value) != 32) return false;
+    for (size_t index = 0; index < 32; ++index) {
+        char ch = value[index];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
+    }
+    return true;
+}
+
 static bool saki_json_uint64_optional(
     const cJSON *object,
     const char *key,
@@ -372,6 +398,31 @@ static bool saki_protocol_parse_state_name(
     return false;
 }
 
+static bool saki_protocol_parse_activity_kind(
+    const cJSON *activity,
+    char *kind,
+    size_t capacity
+)
+{
+    static const char *const kinds[] = {
+        "plan", "read", "edit", "shell", "web", "test", "message", "other",
+    };
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(activity, "kind");
+
+    if (item == NULL) {
+        return true;
+    }
+    if (!cJSON_IsString(item) || item->valuestring == NULL) {
+        return false;
+    }
+    for (size_t index = 0; index < sizeof(kinds) / sizeof(kinds[0]); ++index) {
+        if (strcmp(item->valuestring, kinds[index]) == 0) {
+            return snprintf(kind, capacity, "%s", kinds[index]) > 0;
+        }
+    }
+    return false;
+}
+
 static bool saki_protocol_parse_snapshot(
     const saki_protocol_engine_t *engine,
     const cJSON *root,
@@ -428,6 +479,11 @@ static bool saki_protocol_parse_snapshot(
     activity = cJSON_GetObjectItemCaseSensitive(root, "activity");
     if (activity != NULL &&
         (!cJSON_IsObject(activity) ||
+         !saki_protocol_parse_activity_kind(
+             activity,
+             snapshot->activity_kind,
+             sizeof(snapshot->activity_kind)
+         ) ||
          !saki_copy_json_text(
              activity,
              "summary",
@@ -557,7 +613,7 @@ static void saki_protocol_handle_hello(
         ",\"reply_to\":%" PRIu32
         ",\"role\":\"device\",\"device\":{\"name\":\"saki-box3\",\"fw\":\"%s\",\"id\":\"%s\"},"
         "\"screen\":{\"width\":320,\"height\":240},"
-        "\"capabilities\":[\"status\",\"progress\",\"utf8\",\"touch-detail\"%s%s%s%s]%s}\n",
+        "\"capabilities\":[\"status\",\"progress\",\"utf8\",\"touch-detail\"%s%s%s%s%s]%s}\n",
         saki_protocol_next_id(engine),
         request_id,
         engine->firmware_version,
@@ -573,6 +629,10 @@ static void saki_protocol_handle_hello(
             ? ",\"transport-arbitration\""
             : "",
         engine->submit_display != NULL ? ",\"multi-session\"" : "",
+        engine->submit_display != NULL &&
+                (engine->capability_flags & SAKI_PROTOCOL_CAPABILITY_GENERIC_SOURCE) != 0
+            ? ",\"generic-source\""
+            : "",
         multi ? ",\"mode\":\"multi-session\"" : ""
     );
     (void)saki_protocol_send(engine, response, length);
@@ -798,24 +858,31 @@ static void saki_protocol_handle_sessions(
             display->items[i].task_id[0] == '\0') {
             goto invalid;
         }
-        const char *label;
-        if (strcmp(source->valuestring, "codex") == 0) label = "Codex";
-        else if (strcmp(source->valuestring, "claude_code") == 0) label = "Claude Code";
-        else if (strcmp(source->valuestring, "legacy") == 0) label = "Agent";
-        else goto invalid;
-        if (strcmp(source->valuestring, "legacy") != 0) {
-            if (strlen(display->items[i].task_id) != 32) goto invalid;
-            for (size_t k = 0; k < 32; ++k) {
-                char ch = display->items[i].task_id[k];
-                if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) goto invalid;
-            }
+        const char *label = NULL;
+        bool generic_source =
+            (engine->capability_flags & SAKI_PROTOCOL_CAPABILITY_GENERIC_SOURCE) != 0;
+        if (source->valuestring == NULL) goto invalid;
+        if (generic_source) {
+            if (!saki_source_key_valid(source->valuestring)) goto invalid;
+            if (strcmp(source->valuestring, "legacy") == 0) label = "Agent";
+            else if (!saki_pseudonym_valid(display->items[i].task_id) ||
+                     display->items[i].agent_name[0] == '\0') goto invalid;
+        } else {
+            if (strcmp(source->valuestring, "codex") == 0) label = "Codex";
+            else if (strcmp(source->valuestring, "claude_code") == 0) label = "Claude Code";
+            else if (strcmp(source->valuestring, "legacy") == 0) label = "Agent";
+            else goto invalid;
+            if (strcmp(source->valuestring, "legacy") != 0 &&
+                !saki_pseudonym_valid(display->items[i].task_id)) goto invalid;
         }
         for (size_t k = 0; display->run_ids[i][k]; ++k) {
             char ch = display->run_ids[i][k];
             if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') ||
                   (ch >= 'A' && ch <= 'Z') || ch == '-' || ch == '_')) goto invalid;
         }
-        snprintf(display->items[i].agent_name, sizeof(display->items[i].agent_name), "%s", label);
+        if (label != NULL) {
+            snprintf(display->items[i].agent_name, sizeof(display->items[i].agent_name), "%s", label);
+        }
         display->items[i].stale = !cJSON_IsTrue(fresh);
         for (uint8_t j = 0; j < i; ++j) {
             if (strcmp(display->items[i].task_id, display->items[j].task_id) == 0) goto invalid;

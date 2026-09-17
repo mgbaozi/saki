@@ -99,6 +99,8 @@ extern esp_lcd_panel_handle_t panel_handle;
 
 /* lcd相关函数 */
 esp_err_t lcd_init(void);                                                                                    /* 初始化lcd */
+void lcd_refresh_begin(void);                                                                                /* 标记一次异步刷新开始 */
+bool lcd_refresh_wait(uint32_t timeout_ms);                                                                  /* 等待异步刷新完成 */
 void lcd_clear(uint16_t color);                                                                                         /* 清除屏幕 */
 void lcd_display_dir(uint8_t dir);                                                                                      /* lcd显示方向设置 */
 void lcd_draw_point(uint16_t x, uint16_t y, uint16_t color);                                                            /* lcd画点函数 */

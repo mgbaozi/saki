@@ -11,12 +11,12 @@ from unittest.mock import patch
 import pytest
 
 from saki_host import cli
-from saki_host.adapters import SourceKind, normalize_hook
-from saki_host.adapters.base import SourceEvent
+from saki_host.adapters import ADAPTERS, SourceKind, adapter_for, normalize_hook
+from saki_host.adapters.base import EventKind, HookConfigFamily, SourceEvent
 from saki_host.hooks_config import configure_hooks, merge_hooks
 from saki_host.identity import initialize_identity_key, load_identity_key
 from saki_host.ipc import decode_source_event, encode_source_event
-from saki_host.models import AgentState
+from saki_host.models import ActivityKind, AgentState
 from saki_host.service import SakiHostService, ServiceConfig
 from saki_host.sessions import SessionRegistry, load_checkpoint, save_checkpoint
 
@@ -25,6 +25,50 @@ KEY = b"x" * 32
 
 def event(name="UserPromptSubmit", source=SourceKind.CODEX, sid="same-id", ns=1, **payload):
     return normalize_hook(source, name, {"session_id": sid, **payload}, KEY, emitted_ns=ns)
+
+
+def test_adapter_registry_is_complete_bounded_and_source_owned():
+    assert set(ADAPTERS) == set(SourceKind)
+    assert len({source.value for source in ADAPTERS}) == len(ADAPTERS)
+    for source, spec in ADAPTERS.items():
+        assert spec.source is source
+        assert 1 <= len(source.label.encode()) <= 32
+        assert spec.hook_events
+        assert set(spec.hook_events) <= set(spec.event_kinds)
+        assert spec.config_family is HookConfigFamily.JSON_COMMAND
+        assert spec.settings_path.name in {"hooks.json", "settings.json"}
+
+
+def test_source_specs_own_native_event_semantics_and_identity_fields():
+    assert adapter_for(SourceKind.CLAUDE_CODE).event_kinds["StopFailure"] is EventKind.FAILURE
+    assert "StopFailure" not in adapter_for(SourceKind.CODEX).event_kinds
+    assert event("StopFailure", SourceKind.CODEX) is None
+    assert event("StopFailure", SourceKind.CLAUDE_CODE).kind is EventKind.FAILURE
+    codex = normalize_hook(
+        SourceKind.CODEX,
+        "UserPromptSubmit",
+        {"thread_id": "thread-only", "turn_id": "turn"},
+        KEY,
+        emitted_ns=1,
+    )
+    assert codex.run_id
+    with pytest.raises(ValueError):
+        normalize_hook(
+            SourceKind.CLAUDE_CODE,
+            "UserPromptSubmit",
+            {"thread_id": "thread-only"},
+            KEY,
+            emitted_ns=1,
+        )
+
+
+@pytest.mark.parametrize("source", list(SourceKind))
+def test_source_specs_own_tool_and_input_semantics(source):
+    shell = event("PreToolUse", source, tool_name="exec_command")
+    waiting = event("PreToolUse", source, tool_name="request_user_input")
+    assert shell.activity is ActivityKind.SHELL
+    assert waiting.kind is EventKind.INPUT
+    assert waiting.snapshot().state is AgentState.WAITING_USER
 
 
 def test_sources_are_separate_even_when_titles_paths_and_native_ids_match():
@@ -112,6 +156,32 @@ def test_stop_then_continue_and_ttl_not_extended_by_duplicate():
     assert not registry.accept(event("PreToolUse", ns=6), now=81)
 
 
+def test_failed_session_expires_and_preserves_remaining_ttl_across_restart():
+    registry = SessionRegistry(failed_retention=20)
+    registry.accept(event(source=SourceKind.CLAUDE_CODE, sid="failed"), now=0)
+    registry.accept(
+        event("StopFailure", SourceKind.CLAUDE_CODE, sid="failed", ns=2),
+        now=1,
+    )
+    saved = registry.checkpoint(now=5, wall=100)
+
+    restored = SessionRegistry(failed_retention=20)
+    restored.restore(saved, now=100, wall=110)
+    restored.tick(now=105)
+    assert restored.focus(105).state is AgentState.FAILED
+    restored.tick(now=106)
+    assert not restored.records
+
+    # Checkpoints written before failed sessions gained a TTL migrate into the
+    # same bounded attention window instead of remaining forever.
+    saved["records"][0]["expires_in"] = None
+    restored.restore(saved, now=200, wall=105)
+    restored.tick(now=214)
+    assert restored.records
+    restored.tick(now=215)
+    assert not restored.records
+
+
 def test_waiting_protected_and_capacity_pressure_evicts_terminal():
     registry = SessionRegistry(capacity=2)
     registry.accept(event(sid="waiting"), now=0)
@@ -127,8 +197,9 @@ def test_waiting_protected_and_capacity_pressure_evicts_terminal():
 
 def test_source_local_elapsed_and_stale_are_independent():
     registry = SessionRegistry(stale_after=10)
+    sources = tuple(SourceKind)
     for index in range(4):
-        registry.accept(event(sid=str(index), source=list(SourceKind)[index % 2]), now=index)
+        registry.accept(event(sid=str(index), source=sources[index % len(sources)]), now=index)
     assert registry.tick(now=10)
     first = registry.records[event(sid="0").session_id]
     assert first.stale and first.current(100).elapsed_ms == 10000
@@ -140,6 +211,74 @@ def test_source_local_elapsed_and_stale_are_independent():
         == 9000
     )
     assert len({item.event.session_id for item in registry.visible()}) == 4
+
+
+def test_stale_running_session_leaves_recent_view_but_can_resume():
+    registry = SessionRegistry(stale_after=10, stale_retention=20)
+    registry.accept(event(sid="quota-limited"), now=0)
+    sid = next(iter(registry.records))
+
+    assert registry.tick(now=10)
+    assert registry.records[sid].stale
+    assert registry.visible()
+    assert registry.tick(now=30)
+    assert registry.records[sid].suppressed
+    assert not registry.visible()
+
+    assert registry.accept(event("PostToolUse", sid="quota-limited", ns=2), now=31)
+    assert not registry.records[sid].stale
+    assert not registry.records[sid].suppressed
+    assert registry.visible()[0].snapshot.state is AgentState.THINKING
+
+
+def test_stale_retention_survives_restart_without_hiding_attention_states():
+    registry = SessionRegistry(stale_after=10, stale_retention=20)
+    registry.accept(event(sid="running"), now=0)
+    registry.tick(now=10)
+    checkpoint = registry.checkpoint(now=15, wall=100)
+
+    restored = SessionRegistry(stale_after=10, stale_retention=20)
+    restored.restore(checkpoint, now=100, wall=105)
+    restored.tick(now=109)
+    assert restored.visible()
+    restored.tick(now=110)
+    assert not restored.visible()
+
+    waiting = SessionRegistry(stale_after=10, stale_retention=20)
+    waiting.accept(event(sid="approval"), now=0)
+    waiting.accept(event("PermissionRequest", sid="approval", ns=2), now=1)
+    checkpoint = waiting.checkpoint(now=15, wall=100)
+    restored.restore(checkpoint, now=200, wall=105)
+    restored.tick(now=1000)
+    assert restored.visible()[0].snapshot.state is AgentState.WAITING_APPROVAL
+
+
+@pytest.mark.parametrize("source", list(SourceKind))
+def test_registered_source_lifecycle_resume_old_run_and_ttl(source):
+    registry = SessionRegistry(stale_after=10)
+    registry.accept(event(source=source, sid="lifecycle", turn_id="run-1"), now=0)
+    registry.accept(
+        event("PreToolUse", source, sid="lifecycle", turn_id="run-1", ns=2), now=1
+    )
+    registry.tick(now=11)
+    record = next(iter(registry.records.values()))
+    assert record.stale
+    assert record.current(20).elapsed_ms == 11000
+    registry.accept(event("SessionStart", source, sid="lifecycle", ns=3), now=12)
+    assert not record.stale
+    assert record.current(12).elapsed_ms == 11000
+    if source is SourceKind.CODEX:
+        registry.accept(event(source=source, sid="lifecycle", turn_id="run-2", ns=4), now=13)
+        assert not registry.accept(
+            event("Stop", source, sid="lifecycle", turn_id="run-1", ns=5), now=14
+        )
+        registry.accept(
+            event("Stop", source, sid="lifecycle", turn_id="run-2", ns=6), now=15
+        )
+    else:
+        registry.accept(event("Stop", source, sid="lifecycle", ns=4), now=15)
+    registry.tick(now=75)
+    assert not registry.records
 
 
 def test_checkpoint_is_private_bounded_and_restores_as_unconfirmed(tmp_path):
@@ -208,20 +347,57 @@ def test_configuration_preserves_credentials_and_other_hooks(tmp_path):
     assert original["hooks"]["Stop"][0]["hooks"][0]["command"] == "user-command"
 
 
-def test_configuration_install_check_and_uninstall_are_idempotent(tmp_path):
-    path = tmp_path / "settings.json"
+@pytest.mark.parametrize("source", list(SourceKind))
+def test_configuration_installs_exact_source_event_set(source, tmp_path):
+    installed = merge_hooks({}, source, tmp_path / "hook.sh", install=True)
+    assert set(installed["hooks"]) == set(adapter_for(source).hook_events)
+
+
+@pytest.mark.parametrize("source", list(SourceKind))
+def test_configuration_install_check_and_uninstall_are_idempotent(source, tmp_path):
+    path = tmp_path / "project with spaces" / adapter_for(source).settings_path.name
+    path.parent.mkdir()
     path.write_text('{"env":{"ANTHROPIC_API_KEY":"FAKE-SECRET"}}')
-    state_dir = tmp_path / "state"
-    first = configure_hooks(path, SourceKind.CLAUDE_CODE, "install", state_dir=state_dir)
+    state_dir = tmp_path / "private state"
+    first = configure_hooks(path, source, "install", state_dir=state_dir)
     assert first["changed"]
     assert "FAKE-SECRET" not in json.dumps(first)
-    assert not configure_hooks(path, SourceKind.CLAUDE_CODE, "install", state_dir=state_dir)[
-        "changed"
-    ]
-    assert configure_hooks(path, SourceKind.CLAUDE_CODE, "check", state_dir=state_dir)["installed"]
-    configure_hooks(path, SourceKind.CLAUDE_CODE, "uninstall", state_dir=state_dir)
+    assert not configure_hooks(path, source, "install", state_dir=state_dir)["changed"]
+    status = configure_hooks(path, source, "check", state_dir=state_dir)
+    assert status["installed"] and status["wrapper_ready"] and status["identity_ready"]
+    configure_hooks(path, source, "uninstall", state_dir=state_dir)
     assert json.loads(path.read_text())["env"]["ANTHROPIC_API_KEY"] == "FAKE-SECRET"
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("raw", ['{"hooks":', "[]", '{"hooks":{"Stop":{}}}'])
+def test_configuration_rejects_damaged_settings_without_replacing_them(raw, tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(raw)
+    with pytest.raises((TypeError, ValueError, json.JSONDecodeError)):
+        configure_hooks(path, SourceKind.CLAUDE_CODE, "install", state_dir=tmp_path / "state")
+    assert path.read_text() == raw
+
+
+def test_configuration_refuses_concurrent_settings_change(monkeypatch, tmp_path):
+    from saki_host import hooks_config
+
+    path = tmp_path / "settings.json"
+    path.write_text('{"hooks":{}}')
+    original_read = hooks_config._read_settings
+    calls = 0
+
+    def changed_on_second_read(candidate):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            path.write_text('{"hooks":{},"changed_by_user":true}')
+        return original_read(candidate)
+
+    monkeypatch.setattr(hooks_config, "_read_settings", changed_on_second_read)
+    with pytest.raises(ValueError, match="changed during installation"):
+        configure_hooks(path, SourceKind.CODEX, "install", state_dir=tmp_path / "state")
+    assert json.loads(path.read_text())["changed_by_user"] is True
 
 
 @pytest.mark.parametrize("raw", ['{"password":"FAKE-SECRET"', "[]", "[" * 1000, "x" * 65537])

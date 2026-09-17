@@ -12,6 +12,7 @@ extern "C" {
 #define SAKI_TASK_ID_CAPACITY       65
 #define SAKI_TASK_TITLE_CAPACITY    161
 #define SAKI_ACTIVITY_CAPACITY      241
+#define SAKI_ACTIVITY_KIND_CAPACITY 9
 #define SAKI_DETAIL_CAPACITY        513
 #define SAKI_PROGRESS_LABEL_CAPACITY 65
 #define SAKI_AGENT_NAME_CAPACITY    33
@@ -49,6 +50,7 @@ typedef struct {
     char transport[SAKI_TRANSPORT_CAPACITY];
     char task_id[SAKI_TASK_ID_CAPACITY];
     char task_title[SAKI_TASK_TITLE_CAPACITY];
+    char activity_kind[SAKI_ACTIVITY_KIND_CAPACITY];
     char activity[SAKI_ACTIVITY_CAPACITY];
     char detail[SAKI_DETAIL_CAPACITY];
     saki_progress_mode_t progress_mode;

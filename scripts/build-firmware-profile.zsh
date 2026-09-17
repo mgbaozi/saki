@@ -8,10 +8,10 @@ SAKI_PROFILE="${1:-dev}"
 
 case "$SAKI_PROFILE" in
   dev)
-    SAKI_VERSION="0.4.5-dev"
+    SAKI_VERSION="0.5.0-dev"
     ;;
   release)
-    SAKI_VERSION="0.4.5"
+    SAKI_VERSION="0.5.0"
     ;;
   *)
     print -u2 -- "usage: scripts/build-firmware-profile.zsh [dev|release]"

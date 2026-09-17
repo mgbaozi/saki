@@ -21,6 +21,15 @@ This distribution includes generated glyph data derived from Noto Sans CJK SC,
 licensed under the SIL Open Font License 1.1. The complete font license is in
 firmware/components/saki_ui/fonts/licenses/NotoSansCJK-OFL-1.1.txt.
 
+The optional `saki_stage` theme contains AI-assisted, unofficial fan artwork
+inspired by characters from BanG Dream!, It's MyGO!!!!!, and Ave Mujica. No
+official image, logo, or extracted franchise asset is included. Character
+names, likenesses, and the referenced franchises belong to their respective
+rights holders. This theme is not endorsed by or affiliated with those rights
+holders, and its character likenesses are not licensed under the Apache
+License 2.0. The surrounding Saki code and original project materials remain
+under their stated licenses.
+
 The firmware includes board-support code derived from the ATK-DNESP32S3B3
 examples published by Guangzhou Xingyi Electronic Technology Co., Ltd.
 (ALIENTEK / 正点原子). Original copyright notices are retained in those source

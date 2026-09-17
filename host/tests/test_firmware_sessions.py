@@ -70,6 +70,34 @@ def test_native_firmware_sessions(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
+    generic_known = subprocess.run(
+        [str(binary), str(fixture), "generic-known"],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+    )
+    assert generic_known.returncode == 0, generic_known.stdout + generic_known.stderr
+
+    generic_fixture = tmp_path / "sessions-generic.ndjson"
+    generic_fixture.write_text(
+        json.dumps(
+            json.loads(
+                (ROOT / "protocol/fixtures/v1/valid/sessions-generic.json").read_text()
+            ),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    generic = subprocess.run(
+        [str(binary), str(generic_fixture), "generic"],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+    )
+    assert generic.returncode == 0, generic.stdout + generic.stderr
+
     # All candidates have a newer global sequence: rejection must be validation,
     # never an accidental stale-sequence result. The committed list stays intact.
     original = json.loads(fixture.read_text())

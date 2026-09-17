@@ -10,6 +10,7 @@
 #define SESSION "00000000-0000-4000-8000-000000000001"
 #define HELLO "{\"v\":1,\"type\":\"hello\",\"id\":1,\"role\":\"host\",\"session\":\"" SESSION "\",\"mode\":\"multi-session\"}\n"
 #define EMPTY "{\"v\":1,\"type\":\"sessions\",\"id\":2,\"session\":\"" SESSION "\",\"seq\":1,\"sessions\":[],\"total\":0,\"hidden_attention\":0,\"capacity_rejected\":0}\n"
+#define GENERIC "{\"v\":1,\"type\":\"sessions\",\"id\":2,\"session\":\"" SESSION "\",\"seq\":1,\"sessions\":[{\"source\":\"demo_agent\",\"run_id\":\"local-1\",\"revision\":1,\"fresh\":true,\"state\":\"working\",\"agent\":{\"name\":\"Demo Agent\"},\"task\":{\"id\":\"0123456789abcdef0123456789abcdef\",\"title\":\"Generic source\"},\"activity\":{\"kind\":\"shell\",\"summary\":\"Building\"}}],\"total\":1,\"hidden_attention\":0,\"capacity_rejected\":0}\n"
 #define CHECK(condition) do { if (!(condition)) return __LINE__; } while (0)
 static saki_protocol_engine_t usb, ble;
 static saki_transport_manager_t manager;
@@ -115,19 +116,51 @@ static int test_invalid(void)
     feed(&usb, large); CHECK(strstr(response, "frame_too_large") != NULL && commits == 1);
     return 0;
 }
+static int test_generic_source(void)
+{
+    reset();
+    usb.capability_flags |= SAKI_PROTOCOL_CAPABILITY_GENERIC_SOURCE;
+    feed(&usb, HELLO);
+    CHECK(strstr(response, "\"generic-source\"") != NULL);
+    feed(&usb, GENERIC);
+    CHECK(commits == 1 && current.count == 1);
+    CHECK(strcmp(current.items[0].agent_name, "Demo Agent") == 0);
+    CHECK(strcmp(current.items[0].activity_kind, "shell") == 0);
+    feed(&usb, "{\"v\":1,\"type\":\"sessions\",\"id\":3,\"session\":\"" SESSION "\",\"seq\":2,\"sessions\":[{\"source\":\"Bad-Agent\",\"run_id\":\"local-1\",\"revision\":2,\"fresh\":true,\"state\":\"working\",\"agent\":{\"name\":\"Bad\"},\"task\":{\"id\":\"0123456789abcdef0123456789abcdef\",\"title\":\"Bad\"}}],\"total\":1,\"hidden_attention\":0,\"capacity_rejected\":0}\n");
+    CHECK(commits == 1 && manager.last_seq == 1);
+    feed(&usb, "{\"v\":1,\"type\":\"sessions\",\"id\":4,\"session\":\"" SESSION "\",\"seq\":2,\"sessions\":[{\"source\":\"demo_agent\",\"run_id\":\"local-1\",\"revision\":2,\"fresh\":true,\"state\":\"working\",\"agent\":{\"name\":\"Demo Agent\"},\"task\":{\"id\":\"0123456789abcdef0123456789abcdef\",\"title\":\"Bad activity\"},\"activity\":{\"kind\":\"unknown\"}}],\"total\":1,\"hidden_attention\":0,\"capacity_rejected\":0}\n");
+    CHECK(commits == 1 && manager.last_seq == 1);
+    return 0;
+}
 #ifdef SAKI_NATIVE_TEST
 int main(int argc, char **argv)
 {
     int result = test_commit(); if (!result) result = test_invalid();
+    if (!result) result = test_generic_source();
     if (result) { fprintf(stderr, "contract failed at line %d\n", result); return 1; }
     if (argc >= 2) {
         char frame[4096]; FILE *file = fopen(argv[1], "rb"); if (!file) return 2;
         size_t length = fread(frame, 1, sizeof(frame)-2, file); fclose(file);
         frame[length++] = '\n'; frame[length] = 0;
         reset();
-        if (argc == 3) {
+        if (argc == 3 && strcmp(argv[2], "reject") == 0) {
             feed(&usb, EMPTY); feed(&usb, frame);
             return commits == 1 && manager.last_seq == 1 ? 0 : 5;
+        }
+        if (argc == 3 && strcmp(argv[2], "generic") == 0) {
+            usb.capability_flags |= SAKI_PROTOCOL_CAPABILITY_GENERIC_SOURCE;
+            feed(&usb, HELLO); feed(&usb, frame);
+            if (commits == 1 && current.count == 1 &&
+                strcmp(current.items[0].agent_name, "演示 Agent") == 0) return 0;
+            fprintf(stderr, "generic commits=%u count=%u label=%s response=%s\n",
+                commits, current.count, current.items[0].agent_name, response);
+            return 6;
+        }
+        if (argc == 3 && strcmp(argv[2], "generic-known") == 0) {
+            usb.capability_flags |= SAKI_PROTOCOL_CAPABILITY_GENERIC_SOURCE;
+            feed(&usb, HELLO); feed(&usb, frame);
+            return commits == 1 && current.count == 4 &&
+                strcmp(current.items[0].agent_name, "Codex") == 0 ? 0 : 7;
         }
         feed(&usb, frame);
         if (commits != 1 || current.count != 4 || strcmp(current.items[0].agent_name, "Codex") != 0) return 3;
@@ -142,4 +175,6 @@ TEST_CASE("multi-session commits are atomic and isolated across peers", "[saki_p
 { TEST_ASSERT_EQUAL_INT(0, test_commit()); }
 TEST_CASE("multi-session rejects invalid bounded input without applying", "[saki_protocol]")
 { TEST_ASSERT_EQUAL_INT(0, test_invalid()); }
+TEST_CASE("generic source requires capability and bounded metadata", "[saki_protocol]")
+{ TEST_ASSERT_EQUAL_INT(0, test_generic_source()); }
 #endif

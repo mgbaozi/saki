@@ -146,6 +146,7 @@
                 "properties": {
                   "name": {
                     "type": "string",
+                    "minLength": 1,
                     "maxLength": 32
                   },
                   "model": {
@@ -156,11 +157,8 @@
                 "additionalProperties": true
               },
               "source": {
-                "enum": [
-                  "codex",
-                  "claude_code",
-                  "legacy"
-                ]
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,31}$"
               },
               "run_id": {
                 "type": "string",
@@ -182,14 +180,16 @@
                 "if": {
                   "properties": {
                     "source": {
-                      "enum": [
-                        "codex",
-                        "claude_code"
-                      ]
+                      "not": {
+                        "const": "legacy"
+                      }
                     }
                   }
                 },
                 "then": {
+                  "required": [
+                    "agent"
+                  ],
                   "properties": {
                     "task": {
                       "properties": {
@@ -197,6 +197,11 @@
                           "pattern": "^[a-f0-9]{32}$"
                         }
                       }
+                    },
+                    "agent": {
+                      "required": [
+                        "name"
+                      ]
                     }
                   }
                 }

@@ -11,18 +11,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .adapters import SourceKind
+from .adapters import SourceKind, adapter_for
+from .adapters.base import HookConfigFamily
 from .identity import DEFAULT_STATE_DIR, initialize_identity_key, load_identity_key
-
-_EVENTS = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PermissionRequest",
-    "Stop",
-    "SessionEnd",
-]
 
 
 def marker(source: SourceKind) -> str:
@@ -62,15 +53,10 @@ def merge_hooks(settings: dict, source: SourceKind, wrapper: Path, *, install: b
         else:
             del hooks[event]
     if install:
-        events = [
-            *_EVENTS,
-            *(
-                ["PostToolUseFailure", "StopFailure"]
-                if source is SourceKind.CLAUDE_CODE
-                else ["Interrupt"]
-            ),
-        ]
-        for event in events:
+        spec = adapter_for(source)
+        if spec.config_family is not HookConfigFamily.JSON_COMMAND:
+            raise ValueError("unsupported hook config family")
+        for event in spec.hook_events:
             command = f"{shlex.quote(str(wrapper.resolve()))} {event}{marker(source)}"
             hooks.setdefault(event, []).append(
                 {

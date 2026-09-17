@@ -1,8 +1,8 @@
 # Saki CJK font
 
 `saki_font_cjk_16.c` is a 16 px, 2 bpp LVGL fallback font containing all
-7,445 symbols in Python's GB2312 mapping (including 6,763 Han characters).
-Latin text continues to use Montserrat.
+7,445 symbols in Python's GB2312 mapping (including 6,763 Han characters), plus
+U+2014 EM DASH for the built-in theme copy. Latin text continues to use Montserrat.
 
 Source font: `NotoSansCJKsc-Regular.otf` from the official
 [`notofonts/noto-cjk`](https://github.com/notofonts/noto-cjk/blob/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf)

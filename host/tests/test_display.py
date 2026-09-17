@@ -8,15 +8,16 @@ from test_sources import event
 
 from saki_host.adapters import SourceKind
 from saki_host.display import encode_projection, projection
-from saki_host.protocol import ProtocolCodec, encode_frame
+from saki_host.protocol import ProtocolCodec, ProtocolError, encode_frame
 from saki_host.protocol_session import ProtocolSession, ProtocolSessionError
 from saki_host.sessions import SessionRegistry
 
 
 def mixed_projection():
     registry = SessionRegistry()
+    sources = tuple(SourceKind)
     for index in range(4):
-        registry.accept(event(source=list(SourceKind)[index % 2], sid=str(index)), now=0)
+        registry.accept(event(source=sources[index % len(sources)], sid=str(index)), now=0)
     return projection(registry, 1)
 
 
@@ -28,7 +29,20 @@ def test_complete_mixed_set_schema_and_empty_clear():
     empty = encode_projection(codec, {**view, "sessions": [], "total": 0})
     message_validator().validate(empty)
     assert empty["seq"] > encoded["seq"]
-    assert {r["source"] for r in encoded["sessions"]} == {"codex", "claude_code"}
+    assert {r["source"] for r in encoded["sessions"]} == {
+        source.value for source in tuple(SourceKind)[:4]
+    }
+
+
+def test_suppressed_stale_session_is_not_counted_as_recent():
+    registry = SessionRegistry(stale_after=10, stale_retention=20)
+    registry.accept(event(sid="quota-limited"), now=0)
+    registry.tick(now=10)
+    assert projection(registry, 20)["total"] == 1
+    registry.tick(now=30)
+    view = projection(registry, 30)
+    assert view["total"] == 0
+    assert view["sessions"] == []
 
 
 def test_worst_case_escaping_fits_without_mutating_original_or_identities():
@@ -49,6 +63,52 @@ def test_worst_case_escaping_fits_without_mutating_original_or_identities():
         item["task"]["id"] for item in view["sessions"]
     ]
     assert all(item["task"]["title"] for item in message["sessions"])
+
+
+def test_generic_source_is_preserved_or_safely_downgraded_by_capability():
+    view = mixed_projection()
+    view["sessions"][0]["source"] = "demo_agent"
+    view["sessions"][0]["agent"]["name"] = "演示 Agent"
+    original = copy.deepcopy(view)
+
+    generic = encode_projection(ProtocolCodec(), view, generic_source=True)
+    legacy = encode_projection(ProtocolCodec(), view, generic_source=False)
+
+    assert generic["sessions"][0]["source"] == "demo_agent"
+    assert generic["sessions"][0]["agent"]["name"] == "演示 Agent"
+    assert legacy["sessions"][0]["source"] == "legacy"
+    assert legacy["sessions"][0]["agent"]["name"] == "Agent"
+    assert view == original
+    message_validator().validate(generic)
+    message_validator().validate(legacy)
+
+
+def test_generic_source_metadata_is_bounded_before_encoding():
+    view = mixed_projection()
+    item = view["sessions"][0]
+    item["source"] = "demo_agent"
+    item["agent"]["name"] = "A" * 32
+    message_validator().validate(
+        encode_projection(ProtocolCodec(), view, generic_source=True)
+    )
+    item["agent"]["name"] = "演" * 10
+    message_validator().validate(
+        encode_projection(ProtocolCodec(), view, generic_source=True)
+    )
+    item["agent"]["name"] = "演" * 11
+    with pytest.raises(ProtocolError, match="agent name"):
+        encode_projection(ProtocolCodec(), view, generic_source=True)
+    item["agent"]["name"] = ""
+    with pytest.raises(ProtocolError, match="agent name"):
+        encode_projection(ProtocolCodec(), view, generic_source=True)
+    item["agent"]["name"] = "Demo Agent"
+    item["source"] = "Demo-Agent"
+    with pytest.raises(ProtocolError, match="source key"):
+        encode_projection(ProtocolCodec(), view, generic_source=True)
+    item["source"] = "demo_agent"
+    item["task"]["id"] = "raw-id"
+    with pytest.raises(ProtocolError, match="pseudonymous"):
+        encode_projection(ProtocolCodec(), view, generic_source=True)
 
 
 @pytest.mark.asyncio
@@ -74,8 +134,9 @@ async def test_service_freezes_mixed_set_and_retains_events_during_slow_ack():
     from saki_host.transports.base import TransportKind
 
     service = SakiHostService(ServiceConfig())
+    sources = tuple(SourceKind)
     for index in range(4):
-        service.accept_source_event(event(sid=str(index), source=list(SourceKind)[index % 2]))
+        service.accept_source_event(event(sid=str(index), source=sources[index % len(sources)]))
     sent = []
     started = asyncio.Event()
     release = asyncio.Event()
@@ -150,6 +211,33 @@ def test_main_is_not_displaced_by_hidden_attention():
     assert encoded["sessions"][0] == view["sessions"][0]
 
 
+def test_registry_and_device_capacity_do_not_depend_on_source_count():
+    registry = SessionRegistry()
+    sources = tuple(SourceKind)
+    for index in range(32):
+        registry.accept(
+            event(sid=f"capacity-{index}", source=sources[index % len(sources)]),
+            now=index,
+        )
+    for index in range(10):
+        registry.accept(
+            event(
+                "PermissionRequest",
+                sid=f"capacity-{index}",
+                source=sources[index % len(sources)],
+                ns=2,
+            ),
+            now=33 + index,
+        )
+    view = projection(registry, 50)
+    encoded = encode_projection(ProtocolCodec(), view)
+    assert len(registry.records) == 32
+    assert view["total"] == 32
+    assert len(view["sessions"]) == 4
+    assert view["hidden_attention"] == 7
+    assert len(encode_frame(encoded)) <= 2049
+
+
 @pytest.mark.parametrize("source", list(SourceKind))
 def test_unstarted_session_never_displaces_completed_task(source):
     registry = SessionRegistry()
@@ -162,7 +250,9 @@ def test_unstarted_session_never_displaces_completed_task(source):
     view = projection(registry, 2)
     assert [r["task"]["id"] for r in view["sessions"]] == [done.session_id]
     assert view["sessions"][0]["state"] == "completed"
-    assert view["total"] == 2  # Total remains the Host registry count.
+    # The device footer counts recent displayable sessions, not identities that
+    # were only registered when an Agent client opened.
+    assert view["total"] == 1
     message_validator().validate(encode_projection(ProtocolCodec(), view))
     registry.tick(now=60)
     assert registry.focus(60).task.id == done.session_id

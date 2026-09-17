@@ -52,11 +52,16 @@ class ProtocolSession:
         self._request_lock = asyncio.Lock()
         self._connected = False
         self.multi_session = False
+        self.capabilities: frozenset[str] = frozenset()
+        self.generic_source = False
 
     async def connect(self) -> None:
         if self._connected:
             return
         self._receive_buffer.clear()
+        self.multi_session = False
+        self.capabilities = frozenset()
+        self.generic_source = False
         try:
             await self.transport.connect()
         except ByteTransportError as exc:
@@ -66,6 +71,9 @@ class ProtocolSession:
     async def close(self) -> None:
         self._connected = False
         self._receive_buffer.clear()
+        self.multi_session = False
+        self.capabilities = frozenset()
+        self.generic_source = False
         try:
             await self.transport.close()
         except ByteTransportError as exc:
@@ -218,6 +226,7 @@ class ProtocolSession:
             raise ProtocolSessionError(
                 f"device is missing required capabilities: {', '.join(sorted(missing))}"
             )
+        self.capabilities = frozenset(capabilities)
         return response
 
     async def enable_multi_session(self) -> None:
@@ -226,12 +235,20 @@ class ProtocolSession:
         response = await self.request(message, "hello")
         if response.get("mode") != "multi-session":
             raise ProtocolSessionError("device did not select multi-session mode")
+        capabilities = response.get("capabilities")
+        if isinstance(capabilities, list) and all(isinstance(item, str) for item in capabilities):
+            self.capabilities = frozenset(capabilities)
         self.multi_session = True
+        from .display import GENERIC_SOURCE_CAPABILITY
+
+        self.generic_source = GENERIC_SOURCE_CAPABILITY in self.capabilities
 
     async def apply_projection(self, projection: dict) -> dict:
         from .display import encode_projection
 
-        message = encode_projection(self.codec, projection)
+        message = encode_projection(
+            self.codec, projection, generic_source=self.multi_session and self.generic_source
+        )
         response = await self.request(message, "ack")
         if (
             response.get("ok") is not True

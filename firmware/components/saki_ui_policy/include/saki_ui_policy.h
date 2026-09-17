@@ -2,6 +2,7 @@
 #define SAKI_UI_POLICY_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "saki_model.h"
@@ -64,6 +65,14 @@ uint32_t saki_ui_policy_tick(
 );
 
 uint8_t saki_ui_policy_dimming_opacity(uint8_t brightness_percent);
+
+bool saki_ui_format_footer(char *buffer,
+    size_t capacity,
+    bool browsing,
+    uint8_t count,
+    uint8_t total,
+    uint8_t hidden_attention,
+    bool capacity_rejected);
 
 /* sessions[0] is the Host's latest submitted session. Local browsing is temporary. */
 typedef struct {

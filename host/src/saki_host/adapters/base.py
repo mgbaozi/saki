@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from pathlib import Path
+from types import MappingProxyType
+from typing import Self
 
 from ..models import (
     Activity,
@@ -18,12 +22,18 @@ from ..task_goal import display_goal
 
 
 class SourceKind(StrEnum):
-    CODEX = "codex"
-    CLAUDE_CODE = "claude_code"
+    CODEX = ("codex", "Codex")
+    CLAUDE_CODE = ("claude_code", "Claude Code")
+
+    def __new__(cls, value: str, label: str) -> Self:
+        member = str.__new__(cls, value)
+        member._value_ = value
+        member._label = label
+        return member
 
     @property
     def label(self) -> str:
-        return "Codex" if self is SourceKind.CODEX else "Claude Code"
+        return self._label
 
 
 class EventKind(StrEnum):
@@ -38,6 +48,88 @@ class EventKind(StrEnum):
     FAILURE = "failure"
     CANCEL = "cancel"
     CLOSE = "close"
+
+
+class HookConfigFamily(StrEnum):
+    JSON_COMMAND = "json_command"
+
+
+@dataclass(frozen=True, slots=True)
+class NativeHookFields:
+    session_id: str
+    run_id: str = ""
+    event_id: str = ""
+    tool_name: str = ""
+    parent_id: str = ""
+    task_title: str = ""
+    prompt: str = ""
+
+
+ClassifyHook = Callable[[str, Mapping[str, object], EventKind | None], EventKind | None]
+ExtractHook = Callable[[Mapping[str, object]], NativeHookFields]
+
+
+@dataclass(frozen=True, slots=True)
+class AdapterSpec:
+    source: SourceKind
+    default_settings_path: tuple[str, ...]
+    hook_events: tuple[str, ...]
+    event_kinds: Mapping[str, EventKind]
+    extract: ExtractHook
+    classify: ClassifyHook
+    tool_kinds: Mapping[str, ActivityKind]
+    input_tools: frozenset[str]
+    config_family: HookConfigFamily = HookConfigFamily.JSON_COMMAND
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, SourceKind):
+            raise TypeError("invalid adapter source")
+        if (
+            self.source.value == "legacy"
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,31}", self.source.value) is None
+            or not 1 <= len(self.source.label.encode("utf-8")) <= 32
+        ):
+            raise ValueError("invalid adapter source metadata")
+        if (
+            not self.default_settings_path
+            or any(
+                not part or part in {".", ".."} or Path(part).name != part
+                for part in self.default_settings_path
+            )
+        ):
+            raise ValueError("invalid default settings path")
+        if (
+            not self.hook_events
+            or len(set(self.hook_events)) != len(self.hook_events)
+            or any(not isinstance(event, str) or not event for event in self.hook_events)
+        ):
+            raise ValueError("invalid hook events")
+        if not callable(self.extract) or not callable(self.classify):
+            raise TypeError("invalid adapter callbacks")
+        event_kinds = dict(self.event_kinds)
+        if not event_kinds or any(
+            not isinstance(name, str) or not name or not isinstance(kind, EventKind)
+            for name, kind in event_kinds.items()
+        ):
+            raise ValueError("invalid event kinds")
+        if not set(self.hook_events).issubset(event_kinds):
+            raise ValueError("installed hook lacks an event kind")
+        tool_kinds = dict(self.tool_kinds)
+        if any(
+            not isinstance(name, str) or not name or not isinstance(kind, ActivityKind)
+            for name, kind in tool_kinds.items()
+        ):
+            raise ValueError("invalid tool kinds")
+        if any(not isinstance(name, str) or not name for name in self.input_tools):
+            raise ValueError("invalid input tools")
+        if not isinstance(self.config_family, HookConfigFamily):
+            raise TypeError("invalid hook config family")
+        object.__setattr__(self, "event_kinds", MappingProxyType(event_kinds))
+        object.__setattr__(self, "tool_kinds", MappingProxyType(tool_kinds))
+
+    @property
+    def settings_path(self) -> Path:
+        return Path.home().joinpath(*self.default_settings_path)
 
 
 _SAFE_ID = re.compile(r"[a-f0-9]{32}")
@@ -105,7 +197,7 @@ class SourceEvent:
         return StateSnapshot(
             state=state,
             task=TaskInfo(
-                self.session_id, self.goal or f"{self.source.label} 任务 {self.session_id[:4]}"
+                self.session_id, self.goal or "未捕获任务描述"
             ),
             activity=Activity(self.activity, summary),
             progress=Progress(
@@ -122,18 +214,3 @@ class SourceEvent:
             elapsed_ms=elapsed_ms,
             agent=AgentInfo(self.source.label),
         )
-
-
-TOOL_KINDS = {
-    "Bash": ActivityKind.SHELL,
-    "exec_command": ActivityKind.SHELL,
-    "Read": ActivityKind.READ,
-    "read_file": ActivityKind.READ,
-    "Glob": ActivityKind.READ,
-    "Grep": ActivityKind.READ,
-    "Edit": ActivityKind.EDIT,
-    "Write": ActivityKind.EDIT,
-    "apply_patch": ActivityKind.EDIT,
-    "WebFetch": ActivityKind.WEB,
-    "WebSearch": ActivityKind.WEB,
-}

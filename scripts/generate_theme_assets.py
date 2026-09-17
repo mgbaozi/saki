@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Convert a licensed 3x3 RGBA status sheet into bounded LVGL RGB565A8 assets."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+from pathlib import Path
+
+from PIL import Image
+
+STATES = (
+    "idle",
+    "starting",
+    "thinking",
+    "working",
+    "waiting_user",
+    "waiting_approval",
+    "completed",
+    "failed",
+    "cancelled",
+)
+SOURCES = {
+    "saki_stage": "8b41866e0c2ebc5b000f1fd89eb89a413fe80ff4564b600aa3206b85d772af8c",
+}
+ALPHA_CROP_THRESHOLD = 8
+
+
+def _bounded_sprite(source: Image.Image, size: int) -> Image.Image:
+    alpha = source.getchannel("A")
+    visible_alpha = alpha.point(
+        lambda value: 255 if value >= ALPHA_CROP_THRESHOLD else 0
+    )
+    bounds = visible_alpha.getbbox()
+    if bounds is None:
+        raise ValueError("sprite is fully transparent")
+    content = source.crop(bounds)
+    content.putalpha(
+        content.getchannel("A").point(
+            lambda value: 0 if value < ALPHA_CROP_THRESHOLD else value
+        )
+    )
+    inner = max(1, size - 4)
+    content.thumbnail((inner, inner), Image.Resampling.LANCZOS)
+    result = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    result.alpha_composite(content, ((size - content.width) // 2, (size - content.height) // 2))
+    return result
+
+
+def _transparent_runs(projection: tuple[int, ...]) -> list[tuple[int, int]]:
+    runs = []
+    start = None
+    for position, occupied in enumerate((*projection, 1)):
+        if not occupied and start is None:
+            start = position
+        elif occupied and start is not None:
+            runs.append((start, position))
+            start = None
+    return runs
+
+
+def _axis_edges(projection: tuple[int, ...]) -> tuple[int, int, int, int]:
+    length = len(projection)
+    runs = [
+        run
+        for run in _transparent_runs(projection)
+        if run[0] > 0 and run[1] < length
+    ]
+    cuts = []
+    for division in (1, 2):
+        expected = division * length / 3
+        candidates = [
+            run
+            for run in runs
+            if abs(((run[0] + run[1]) / 2) - expected) <= length / 6
+        ]
+        if not candidates:
+            raise ValueError("sprite sheet needs transparent gutters between all cells")
+        start, end = min(
+            candidates,
+            key=lambda run: (
+                run[0] - run[1],
+                abs(((run[0] + run[1]) / 2) - expected),
+            ),
+        )
+        cuts.append((start + end) // 2)
+    edges = (0, cuts[0], cuts[1], length)
+    if len(set(cuts)) != 2 or any(
+        edges[index + 1] - edges[index] < length / 6 for index in range(3)
+    ):
+        raise ValueError("sprite sheet gutters do not define three bounded cells")
+    return edges
+
+
+def _grid_edges(sheet: Image.Image) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    visible_alpha = sheet.getchannel("A").point(
+        lambda value: 255 if value >= ALPHA_CROP_THRESHOLD else 0
+    )
+    columns, rows = visible_alpha.getprojection()
+    return _axis_edges(columns), _axis_edges(rows)
+
+
+def _sprite(
+    sheet: Image.Image,
+    index: int,
+    size: int,
+    column_edges: tuple[int, ...],
+    row_edges: tuple[int, ...],
+) -> Image.Image:
+    column, row = index % 3, index // 3
+    left, right = column_edges[column : column + 2]
+    top, bottom = row_edges[row : row + 2]
+    return _bounded_sprite(sheet.crop((left, top, right, bottom)), size)
+
+
+def _rgb565a8(image: Image.Image) -> bytes:
+    output = bytearray()
+    for red, green, blue, alpha in image.get_flattened_data():
+        value = ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3)
+        output.extend((value & 0xFF, value >> 8, alpha))
+    return bytes(output)
+
+
+def _bytes(values: bytes) -> str:
+    lines = []
+    for offset in range(0, len(values), 18):
+        lines.append("    " + ", ".join(f"0x{value:02x}" for value in values[offset : offset + 18]) + ",")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pack", choices=sorted(SOURCES), required=True)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output-c", type=Path, required=True)
+    parser.add_argument("--output-h", type=Path, required=True)
+    parser.add_argument("--size", type=int, default=48)
+    args = parser.parse_args()
+    if not 16 <= args.size <= 96:
+        parser.error("size must be from 16 to 96")
+    digest = hashlib.sha256(args.input.read_bytes()).hexdigest()
+    if digest != SOURCES[args.pack]:
+        parser.error(f"unexpected source SHA-256: {digest}")
+    sheet = Image.open(args.input).convert("RGBA")
+    if sheet.width < 3 or sheet.height < 3:
+        parser.error("source must be a 3x3 sprite sheet")
+    try:
+        column_edges, row_edges = _grid_edges(sheet)
+    except ValueError as error:
+        parser.error(str(error))
+    prefix = f"saki_theme_{args.pack}"
+    header = """/* Generated by scripts/generate_theme_assets.py; do not edit. */
+#ifndef SAKI_STAGE_ASSETS_H
+#define SAKI_STAGE_ASSETS_H
+#include "lvgl.h"
+"""
+    declarations = "\n".join(
+        f"extern const lv_img_dsc_t {prefix}_{state};" for state in STATES
+    )
+    args.output_h.parent.mkdir(parents=True, exist_ok=True)
+    args.output_h.write_text(f"{header}{declarations}\n#endif\n", encoding="utf-8")
+
+    sections = [
+        "/* Generated by scripts/generate_theme_assets.py; do not edit. */",
+        f"/* Source SHA-256: {digest}; size: {args.size}x{args.size}; "
+        f"RGB565A8; alpha crop >= {ALPHA_CROP_THRESHOLD}. */",
+        f"/* Detected grid x={column_edges}; y={row_edges}. */",
+        f'#include "{args.output_h.name}"',
+        "#if LV_COLOR_DEPTH != 16 || LV_COLOR_16_SWAP != 0",
+        '#error "Saki generated theme assets require unswapped LVGL 16-bit color"',
+        "#endif",
+    ]
+    for index, state in enumerate(STATES):
+        data = _rgb565a8(
+            _sprite(sheet, index, args.size, column_edges, row_edges)
+        )
+        symbol = f"{prefix}_{state}"
+        sections.extend(
+            (
+                f"static const LV_ATTRIBUTE_MEM_ALIGN LV_ATTRIBUTE_LARGE_CONST uint8_t {symbol}_map[] = {{\n{_bytes(data)}\n}};",
+                f"const lv_img_dsc_t {symbol} = {{",
+                "    .header.always_zero = 0,",
+                f"    .header.w = {args.size},",
+                f"    .header.h = {args.size},",
+                f"    .data_size = {len(data)},",
+                "    .header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA,",
+                f"    .data = {symbol}_map,",
+                "};",
+            )
+        )
+    args.output_c.parent.mkdir(parents=True, exist_ok=True)
+    args.output_c.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
