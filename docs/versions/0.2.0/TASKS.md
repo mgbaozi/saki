@@ -1,7 +1,7 @@
 # Saki 实施任务清单
 
 > 文档版本：0.2.0
-> 状态：Release candidate
+> 状态：已发布并冻结；任务状态保留发布时证据，不表示版本仍在实施
 > 产品规格：[SPEC.md](./SPEC.md)
 > 工程设计：[IMPLEMENTATION.md](./IMPLEMENTATION.md)
 

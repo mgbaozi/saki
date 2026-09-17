@@ -1,6 +1,6 @@
 # Saki 0.2.0 用户指南
 
-> 状态：Release candidate
+> 状态：已发布并冻结；当前安装优先使用根 README 和最新稳定版指南
 > 适用硬件：正点原子 ATK-DNESP32S3B3 / ESP32S3 BOX3（16 MB Flash）
 > 第一版传输：USB CDC ACM
 

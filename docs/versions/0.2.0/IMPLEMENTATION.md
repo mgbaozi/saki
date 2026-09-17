@@ -1,7 +1,7 @@
 # Saki 工程实施设计
 
 > 文档版本：0.2.0
-> 状态：Release candidate
+> 状态：已发布并冻结；本文件保留 0.2.0 工程设计
 > 关联规格：[SPEC.md](./SPEC.md)
 > 执行清单：[TASKS.md](./TASKS.md)
 

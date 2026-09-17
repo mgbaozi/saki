@@ -1,7 +1,7 @@
 # Saki AI Agent 状态屏产品与通信规格
 
 > 文档版本：0.2.0
-> 状态：Release candidate
+> 状态：已发布并冻结；本文件保留 0.2.0 行为契约
 > 目标硬件：正点原子 ATK-DNESP32S3B3 / ESP32S3 BOX3
 > 首版传输：USB CDC ACM 有线虚拟串口
 > 首版软件栈：ESP-IDF 5.5.3、FreeRTOS、LVGL 8.4.0
